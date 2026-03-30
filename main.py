@@ -18,6 +18,11 @@ client = TelegramClient('session_bot_korean', API_ID, API_HASH) #.start(bot_toke
 @app.on_event("startup")
 async def startup_event():
     await client.start(bot_token=BOT_TOKEN)
+    asyncio.create_task(client.run_until_disconnected())
+    
+@app.on_event("shutdown")
+async def shutdown_event():
+    await client.disconnect()
 
 @app.get("/")
 async def ping():
@@ -166,7 +171,7 @@ async def necessary_task_handler(event):
 #start a bot
 #with client:
 #    client.start()
-client.run_until_disconnected()
+#client.run_until_disconnected()
 
 #async def main():
 #    await client.start(bot_token=BOT_TOKEN)
