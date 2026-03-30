@@ -30,7 +30,11 @@ async def ping():
 
 models.Base.metadata.create_all(bind=engine)
 
-db = SessionLocal()
+try:
+    db = SessionLocal()
+except Exception as e:
+    print(f"DB connection failed: {e}")
+    db = None
 
 user_states = {}
 
