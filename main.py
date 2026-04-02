@@ -135,6 +135,14 @@ async def addtask(event):
         'example:\n'
         '!Quiz: data structure/2026-03-23/11:00/5'
     )
+    
+@client.on(events.NewMessage(pattern='/sendShak'))
+async def sendmessage(event):
+    user_id = event.sender_id
+    user_states[user_id] = "waiting_for_submitmessage"
+    await event.respond(
+        'send your message to shak'
+    )
 
 @client.on(events.NewMessage(pattern="/add_available_time"))
 async def addavailabletime(event):
@@ -171,6 +179,9 @@ async def necessary_task_handler(event):
                     await event.respond("Successfully saved your available time")
                 except:
                     await event.respond("Could not save available times into database, try again")
+            elif user_states[user_id] == "waiting_for_submitmessage":
+                message_tosend = event.text
+                await client.send_message('@shkiiff', message_tosend)
     else:
         user_message = event.text
         try:
