@@ -181,7 +181,7 @@ async def necessary_task_handler(event):
                     await event.respond("Could not save available times into database, try again")
             elif user_states[user_id] == "waiting_for_submitmessage":
                 message_tosend = event.text.strip("/")
-                await client.send_message(message_tosend[0][1:], message_tosend[1])
+                await client.send_message('@shkiiff', message_tosend[1])
     else:
         user_message = event.text
         try:
