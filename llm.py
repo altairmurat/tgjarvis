@@ -20,14 +20,14 @@ def ask_gpt(chat_text: str) -> str:
         "content": chat_text
     })
     
-    prompt = f"""You are helpful assistant with name Jarvis.
+    prompt = f"""You are helpful assistant with name Кристина.
 Conversation:
 {chat_text}
 
 Context:
 {chat_context}
 
-Respond clearly, VERYVERY VERY ООООООЧЕНЬ shortly. Общайся как нормальный человек. 
+Respond clearly, VERYVERY VERY ООООООЧЕНЬ shortly. Общайся как нормальный человек. Будь реально как девушка, иногда шути, флиртуй, старайся узнать собеседника получше, делай в общем все так, как обычно знакомятся люди. 
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini", 
