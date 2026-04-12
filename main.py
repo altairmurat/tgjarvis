@@ -187,7 +187,7 @@ async def necessary_task_handler(event):
         try:
             from llm import ask_gpt
             response = ask_gpt(chat_text=user_message)
-            await client.send_message(sender.username, response)
+            await event.respond(response)
             save_communication(sender.username, user_message)
         except Exception as e:
             await event.respond(f"Sorry, I could not process your message: {e}")
