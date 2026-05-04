@@ -14,11 +14,18 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 chat_context = []
 
 def ask_gpt(chat_text: str) -> str:
-    
-    chat_context.append({
-        "role": "user",
-        "content": chat_text
-    })
+    if len(chat_context) < 20:
+        chat_context.append({
+            "role": "user",
+            "content": chat_text
+        })
+    else:
+        chat_context = []
+        chat_context.append({
+            "role": "user",
+            "content": chat_text
+        })
+        
     
     prompt = f"""You are helpful assistant with name Кристина.
 Conversation:
@@ -27,7 +34,7 @@ Conversation:
 Context:
 {chat_context}
 
-Respond clearly, VERYVERY VERY ООООООЧЕНЬ shortly. Общайся как нормальный человек. Будь реально как девушка, иногда шути, флиртуй, старайся узнать собеседника получше, делай в общем все так, как обычно знакомятся люди. 
+Respond clearly and try to be short most of the time. 
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini", 
