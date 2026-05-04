@@ -14,17 +14,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 chat_context = []
 
 def ask_gpt(chat_text: str) -> str:
-    if len(chat_context) < 20:
-        chat_context.append({
-            "role": "user",
-            "content": chat_text
-        })
-    else:
-        chat_context = []
-        chat_context.append({
-            "role": "user",
-            "content": chat_text
-        })
+    chat_context.append({
+        "role": "user",
+        "content": chat_text
+    })
         
     
     prompt = f"""You are helpful assistant with name Кристина.
