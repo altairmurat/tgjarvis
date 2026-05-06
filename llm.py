@@ -48,7 +48,7 @@ Respond clearly and try to be short most of the time.
     
     return reply
 
-async def process_telegram_image(message):
+async def process_telegram_image(message, user_prompt):
     # 1. Скачиваем изображение в память (BytesIO)
     image_buffer = BytesIO()
     await message.download_media(file=image_buffer)
@@ -64,7 +64,7 @@ async def process_telegram_image(message):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Что на этом изображении?"},
+                    {"type": "text", "text": f"{user_prompt}"},
                     {
                         "type": "image_url",
                         "image_url": {
