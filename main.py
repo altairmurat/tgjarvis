@@ -190,11 +190,11 @@ async def necessary_task_handler(event):
             try:
                 photo = event.message
                 if user_states[user_id] == "waiting_for_imageprompt":
-                    await event.respond("Please, send your prompt for image")
-                    user_prompt = await event.text
-                    response = await process_telegram_image(photo, user_prompt)
+                    #await event.respond("Please, send your prompt for image")
+                    #user_prompt = await event.text
+                    response = await process_telegram_image(photo, user_prompt="Find the equation of the graph")
                     await event.respond(response)
-                    user_states[user_id] = "Task has been completed"
+                    #user_states[user_id] = "Task has been completed"
             except Exception as e:
                 await event.respond(f"Sorry, I could not process your message: {e}")
         else:        
