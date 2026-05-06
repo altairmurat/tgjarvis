@@ -12,6 +12,7 @@ app = FastAPI()
 client = TelegramClient('session_bot_korean', API_ID, API_HASH)
 
 user_states = {}
+pending_photos = {}
 
 # ── startup / shutdown ────────────────────────────────────────────
 @app.on_event("startup")
@@ -185,16 +186,33 @@ async def necessary_task_handler(event):
                 
     else:
         from llm import process_telegram_image
-        if event.photo:
-            photo = event.message
-            user_states[user_id] = "waiting_for_imageprompt"
-            if user_states[user_id] == "waiting_for_imageprompt":
-                await event.respond("Please, send your prompt for image")
+        
                 
-                userprompt = event.text
-                response = await process_telegram_image(photo, userprompt)
-                await event.respond(response)
-                user_states[user_id] = ""
+        if event.photo:
+            pending_photos[user_id] = event.message # Сохраняем объект сообщения с фото
+            user_states[user_id] = "waiting_for_imageprompt"
+            await event.respond("Вижу фото! Теперь пришлите текст задания для него.")
+            return
+
+        # ЭТАП 2: Пользователь прислал текст, и мы ждем промпт
+        if user_id in user_states and user_states[user_id] == "waiting_for_imageprompt":
+            if event.text:
+                user_prompt = event.text
+                photo_message = pending_photos.get(user_id)
+
+                if photo_message:
+                    await event.respond("Обрабатываю...")
+                    try:
+                        from llm import process_telegram_image
+                        response = await process_telegram_image(photo_message, user_prompt)
+                        await event.respond(response)
+                    except Exception as e:
+                        await event.respond(f"Ошибка: {e}")
+                    
+                    # Очищаем данные после завершения
+                    del user_states[user_id]
+                    del pending_photos[user_id]
+                return
         else:        
             user_message = event.text
             try:
