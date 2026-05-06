@@ -190,9 +190,7 @@ async def necessary_task_handler(event):
             user_states[user_id] = "waiting_for_imageprompt"
             if user_states[user_id] == "waiting_for_imageprompt":
                 await event.respond("Please, send your prompt for image")
-                user_states[user_id] = "sending_imageprompt"
-                return
-            if user_states[user_id] == "sending_imageprompt":
+                
                 userprompt = event.text
                 response = await process_telegram_image(photo, userprompt)
                 await event.respond(response)
