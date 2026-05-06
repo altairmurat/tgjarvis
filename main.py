@@ -160,6 +160,7 @@ async def addavailabletime(event):
 async def necessary_task_handler(event):
     user_id = event.sender_id
     sender = await event.get_sender()
+    message = await client.get_messages(sender.username, limit=1)
 
     if event.text.startswith("/"):
         return
@@ -183,11 +184,19 @@ async def necessary_task_handler(event):
                 message_tosend = event.text.split("/")
                 await client.send_message(message_tosend[0][1:], message_tosend[1])
     else:
-        user_message = event.text
-        try:
-            from llm import ask_gpt
-            response = ask_gpt(chat_text=user_message)
-            await event.respond(response)
-            save_communication(sender.username, user_message)
-        except Exception as e:
-            await event.respond(f"Sorry, I could not process your message: {e}")
+        from llm import process_telegram_image
+        if event.photo:
+            try:
+                response = await process_telegram_image(event.message)
+                await event.respond(response)
+            except Exception as e:
+                await event.respond(f"Sorry, I could not process your message: {e}")
+        else:        
+            user_message = event.text
+            try:
+                from llm import ask_gpt
+                response = ask_gpt(chat_text=user_message)
+                await event.respond(response)
+                save_communication(sender.username, user_message)
+            except Exception as e:
+                await event.respond(f"Sorry, I could not process your message: {e}")

@@ -1,6 +1,9 @@
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
+from io import BytesIO
+from PIL import Image
+import base64
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -45,3 +48,33 @@ Respond clearly and try to be short most of the time.
     })
     
     return reply
+
+async def process_telegram_image(message):
+    # 1. Скачиваем изображение в память (BytesIO)
+    image_buffer = BytesIO()
+    await message.download_media(file=image_buffer)
+    
+    # 2. Получаем сырые байты и кодируем в base64
+    image_bytes = image_buffer.getvalue()
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    # 3. Отправляем в OpenAI
+    response = client.chat.completions.create( # В актуальной версии API используется этот метод
+        model="gpt-4o", # Убедитесь, что используете модель с поддержкой зрения (напр. gpt-4o)
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Что на этом изображении?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    return response.choices[0].message.content
