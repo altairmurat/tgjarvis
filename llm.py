@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 from io import BytesIO
-from PIL import Image
 import base64
 
 load_dotenv()
