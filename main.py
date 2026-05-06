@@ -160,7 +160,6 @@ async def addavailabletime(event):
 async def necessary_task_handler(event):
     user_id = event.sender_id
     sender = await event.get_sender()
-    message = await client.get_messages(sender.username, limit=1)
 
     if event.text.startswith("/"):
         return
