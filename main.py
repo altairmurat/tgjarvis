@@ -186,17 +186,17 @@ async def necessary_task_handler(event):
     else:
         from llm import process_telegram_image
         if event.photo:
+            photo = event.message
             user_states[user_id] = "waiting_for_imageprompt"
-            try:
-                photo = event.message
-                if user_states[user_id] == "waiting_for_imageprompt":
-                    #await event.respond("Please, send your prompt for image")
-                    #user_prompt = await event.text
-                    response = await process_telegram_image(photo, user_prompt="Find the equation of the graph")
-                    await event.respond(response)
-                    #user_states[user_id] = "Task has been completed"
-            except Exception as e:
-                await event.respond(f"Sorry, I could not process your message: {e}")
+            if user_states[user_id] == "waiting_for_imageprompt":
+                await event.respond("Please, send your prompt for image")
+                user_states[user_id] = "sending_imageprompt"
+                return
+            if user_states[user_id] == "sending_imageprompt":
+                userprompt = event.text
+                response = await process_telegram_image(photo, userprompt)
+                await event.respond(response)
+                user_states[user_id] = ""
         else:        
             user_message = event.text
             try:
