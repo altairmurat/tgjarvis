@@ -191,17 +191,22 @@ async def necessary_task_handler(event):
     else:
         
         from llm import ask_gpt, process_telegram_image
+        import io
         
         if event.message.voice:
             user_states[user_id] = "waiting_for_voiceback"
             audio_path = "voice.mp3"
             try:
-                await event.message.download_media(file=audio_path)
-                with open(audio_path, "rb") as audio_file:
-                    response = await ai_client.audio.transcriptions.create(
-                        model="gpt-4o-mini-transcribe",  # Экономная и быстрая модель (или "whisper-1")
-                        file=audio_file
-                    )
+                voice_bytes = await event.message.download_media(file=bytes)
+                if not voice_bytes:
+                    await event.reply("Could not download voice message")
+                    return
+                audio_file = io.BytesIO(voice_bytes)
+                audio_file.name = "voice.ogg"
+                response = await ai_client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",  # Экономная и быстрая модель (или "whisper-1")
+                    file=audio_file
+                )
                 if response.text.strip():
                     pending_textvoice[user_id] = response.text
                     try:
