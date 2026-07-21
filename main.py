@@ -1,8 +1,10 @@
 import asyncio
 from telethon import TelegramClient, events
+from openai import AsyncOpenAI
 import datetime
+import os
 
-from env import API_ID, API_HASH, BOT_TOKEN
+from env import API_ID, API_HASH, BOT_TOKEN, OPENAI_API
 from database import SessionLocal, engine
 import models
 from fastapi import FastAPI
@@ -10,9 +12,11 @@ from fastapi import FastAPI
 app = FastAPI()
 
 client = TelegramClient('session_bot_korean', API_ID, API_HASH)
+ai_client = AsyncOpenAI(api_key=OPENAI_API)
 
 user_states = {}
 pending_photos = {}
+pending_textvoice = {}
 
 # ── startup / shutdown ────────────────────────────────────────────
 @app.on_event("startup")
@@ -185,8 +189,31 @@ async def necessary_task_handler(event):
                 await client.send_message(message_tosend[0][1:], message_tosend[1])
                 
     else:
-        from llm import process_telegram_image
         
+        from llm import ask_gpt, process_telegram_image
+        
+        if event.message.voice:
+            user_states[user_id] = "waiting_for_voiceback"
+            audio_path = "voice.mp3"
+            try:
+                await event.message.download_media(file=audio_path)
+                with open(audio_path, "rb") as audio_file:
+                    response = await ai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",  # Экономная и быстрая модель (или "whisper-1")
+                        file=audio_file
+                    )
+                if response.text.strip():
+                    pending_textvoice[user_id] = response.text
+                    try:
+                        response = ask_gpt(chat_text=pending_textvoice[user_id])
+                        await event.respond(response)
+                    except Exception as e:
+                        await event.respond(f"Sorry, I could not process your voice text: {e}")
+                else:
+                    await event.reply("Я тебя не понял бро")
+            finally:
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
                 
         if event.photo:
             pending_photos[user_id] = event.message # Сохраняем объект сообщения с фото
@@ -203,7 +230,6 @@ async def necessary_task_handler(event):
                 if photo_message:
                     await event.respond("Обрабатываю...")
                     try:
-                        from llm import process_telegram_image
                         response = await process_telegram_image(photo_message, user_prompt)
                         await event.respond(response)
                     except Exception as e:
@@ -216,7 +242,6 @@ async def necessary_task_handler(event):
         else:        
             user_message = event.text
             try:
-                from llm import ask_gpt
                 response = ask_gpt(chat_text=user_message)
                 await event.respond(response)
                 save_communication(sender.username, user_message)
