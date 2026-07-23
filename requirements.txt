@@ -6,3 +6,6 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 openai
+google-auth
+google-auth-oauthlib
+google-api-python-client
