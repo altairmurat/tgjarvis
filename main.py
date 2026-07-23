@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 import datetime
 import os, io, re, json, base64
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 from env import API_ID, API_HASH, BOT_TOKEN, OPENAI_API
@@ -16,13 +17,124 @@ app = FastAPI()
 
 client = TelegramClient('session_bot_korean', API_ID, API_HASH)
 ai_client = AsyncOpenAI(api_key=OPENAI_API)
-creds = Credentials.from_authorized_user_file("token.json")
+
+# ── gmail creds: из переменной окружения, а не из файла ────────────
+_token_info = json.loads(os.environ["GOOGLE_TOKEN_JSON"])
+creds = Credentials.from_authorized_user_info(_token_info)
+if creds.expired and creds.refresh_token:
+    creds.refresh(Request())
 gmail = build("gmail", "v1", credentials=creds)
+
+
+def get_gmail_client():
+    """Всегда возвращает валидный gmail client, рефрешит токен если нужно."""
+    global creds, gmail
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        gmail = build("gmail", "v1", credentials=creds)
+    return gmail
 
 user_states = {}
 pending_photos = {}
 pending_textvoice = {}
-draft_cache = {}
+draft_cache = {}  # {gmail_draft_id: to_email}  просто для логов/дебага
+
+# ── email draft tool ───────────────────────────────────────────────
+EMAIL_TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "create_email_draft",
+        "description": "Подготовить черновик письма, когда пользователь просит написать/составить email кому-либо",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipient_name": {"type": "string", "description": "Имя получателя латиницей, стандартный вид (напр. 'Mark Silverlock')"},
+                "topic": {"type": "string", "description": "О чём письмо"},
+            },
+            "required": ["recipient_name", "topic"],
+        },
+    },
+}]
+
+
+def find_email(name: str) -> str | None:
+    gmail = get_gmail_client()
+    res = gmail.users().messages().list(userId="me", q=f'"{name}"', maxResults=5).execute()
+    for m in res.get("messages", []):
+        msg = gmail.users().messages().get(userId="me", id=m["id"], format="metadata",
+                                            metadataHeaders=["From", "To"]).execute()
+        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+        for v in (headers.get("From", ""), headers.get("To", "")):
+            match = re.search(r"[\w.+-]+@[\w.-]+", v)
+            if match and name.split()[0].lower() in v.lower():
+                return match.group(0)
+    return None
+
+
+def create_gmail_draft(to: str, subject: str, body: str) -> str:
+    gmail = get_gmail_client()
+    raw = base64.urlsafe_b64encode(
+        f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode()
+    ).decode()
+    d = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    return d["id"]
+
+
+async def generate_email_text(topic: str, recipient: str) -> tuple[str, str]:
+    r = await ai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content":
+            f"Напиши email на английском, получатель: {recipient}. Тема сообщения: {topic}. "
+            f"Ответь строго JSON: {{\"subject\": \"...\", \"body\": \"...\"}}"}],
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(r.choices[0].message.content)
+    return data["subject"], data["body"]
+
+
+async def try_handle_email_intent(event, user_message: str) -> bool:
+    """Возвращает True если это была задача на письмо и мы её обработали."""
+    r = await ai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": user_message}],
+        tools=EMAIL_TOOLS,
+        tool_choice="auto",
+    )
+    msg = r.choices[0].message
+    if not msg.tool_calls:
+        return False
+
+    args = json.loads(msg.tool_calls[0].function.arguments)
+    name, topic = args["recipient_name"], args["topic"]
+
+    email = find_email(name)
+    if not email:
+        await event.reply(f"Не нашёл email для {name}. Пришли его вручную?")
+        return True
+
+    subject, body = await generate_email_text(topic, name)
+    draft_id = create_gmail_draft(email, subject, body)
+    draft_cache[draft_id] = email
+
+    await event.reply(
+        f"📧 Черновик для {name} ({email})\n\nТема: {subject}\n\n{body}",
+        buttons=[Button.inline("✅ Отправить", f"send:{draft_id}"),
+                 Button.inline("❌ Отмена", f"cancel:{draft_id}")],
+    )
+    return True
+
+
+@client.on(events.CallbackQuery)
+async def on_callback(event):
+    action, draft_id = event.data.decode().split(":")
+    gmail = get_gmail_client()
+    if action == "send":
+        gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+        await event.edit("✅ Отправлено")
+    else:
+        gmail.users().drafts().delete(userId="me", id=draft_id).execute()
+        await event.edit("❌ Отменено")
+    draft_cache.pop(draft_id, None)
 
 # ── startup / shutdown ────────────────────────────────────────────
 @app.on_event("startup")
@@ -65,95 +177,6 @@ def get_current_datetime():
     current_date, current_time = current_datetime[0], current_datetime[1][:5]
     return [current_date, current_time]
 
-# email draft tool
-EMAIL_TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "create_email_draft",
-        "description": "Подготовить черновик письма, когда пользователь просит написать/составить email кому-либо",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "recipient_name": {"type": "string", "description": "Имя получателя латиницей, стандартный вид (напр. 'Mark Silverlock')"},
-                "topic": {"type": "string", "description": "О чём письмо"},
-            },
-            "required": ["recipient_name", "topic"],
-        },
-    },
-}]
-
-def find_email(name: str) -> str | None:
-    res = gmail.users().messages().list(userId="me", q=f'"{name}"', maxResults=5).execute()
-    for m in res.get("messages", []):
-        msg = gmail.users().messages().get(userId="me", id=m["id"], format="metadata",
-                                            metadataHeaders=["From", "To"]).execute()
-        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-        for v in (headers.get("From", ""), headers.get("To", "")):
-            match = re.search(r"[\w.+-]+@[\w.-]+", v)
-            if match and name.split()[0].lower() in v.lower():
-                return match.group(0)
-    return None
-
-def create_gmail_draft(to: str, subject: str, body: str) -> str:
-    raw = base64.urlsafe_b64encode(
-        f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode()
-    ).decode()
-    d = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-    return d["id"]
-
-async def generate_email_text(topic: str, recipient: str) -> tuple[str, str]:
-    r = await ai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content":
-            f"Напиши email на английском, получатель: {recipient}. Тема сообщения: {topic}. "
-            f"Ответь строго JSON: {{\"subject\": \"...\", \"body\": \"...\"}}"}],
-        response_format={"type": "json_object"},
-    )
-    data = json.loads(r.choices[0].message.content)
-    return data["subject"], data["body"]
-
-async def try_handle_email_intent(event, user_message: str) -> bool:
-    """Возвращает True если это была задача на письмо и мы её обработали."""
-    r = await ai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": user_message}],
-        tools=EMAIL_TOOLS,
-        tool_choice="auto",
-    )
-    msg = r.choices[0].message
-    if not msg.tool_calls:
-        return False
- 
-    args = json.loads(msg.tool_calls[0].function.arguments)
-    name, topic = args["recipient_name"], args["topic"]
- 
-    email = find_email(name)
-    if not email:
-        await event.reply(f"Не нашёл email для {name}. Пришли его вручную?")
-        return True
- 
-    subject, body = await generate_email_text(topic, name)
-    draft_id = create_gmail_draft(email, subject, body)
-    draft_cache[draft_id] = email
- 
-    await event.reply(
-        f"📧 Черновик для {name} ({email})\n\nТема: {subject}\n\n{body}",
-        buttons=[Button.inline("✅ Отправить", f"send:{draft_id}"),
-                 Button.inline("❌ Отмена", f"cancel:{draft_id}")],
-    )
-    return True
-
-@client.on(events.CallbackQuery)
-async def on_callback(event):
-    action, draft_id = event.data.decode().split(":")
-    if action == "send":
-        gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute()
-        await event.edit("✅ Отправлено")
-    else:
-        gmail.users().drafts().delete(userId="me", id=draft_id).execute()
-        await event.edit("❌ Отменено")
-    draft_cache.pop(draft_id, None)
-
 # ── telegram handlers ─────────────────────────────────────────────
 @client.on(events.NewMessage(pattern='/start'))
 async def start_message(event):
@@ -173,7 +196,7 @@ async def sendmessage(event):
 async def necessary_task_handler(event):
     user_id = event.sender_id
     sender = await event.get_sender()
- 
+
     if event.text.startswith("/"):
         return
     
