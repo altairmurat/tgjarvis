@@ -1,0 +1,39 @@
+[33m9b7e8d8[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Remove rag.py from tracking
+[33mad022ce[m Secure sensitive files with gitignore
+[33m99b22ee[m Remove secrets and add gitignore
+[33mb082e02[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m add: voice message processing2
+[33ma658ff1[m add: voice message processing
+[33m1a33a54[m fix: userprompt for image
+[33mb5448fe[m fix: userprompt for image
+[33m1e42f86[m fix: userprompt for image
+[33m8a99cba[m fix: userprompt for image
+[33m6be3fd5[m update: user can send his prompt
+[33md0a0f0c[m fix: deleted PIL
+[33m98ef0cc[m fix: deleted message[0]
+[33m98767c2[m update: new possibility to insert image
+[33mfacc19b[m fix
+[33m987fc35[m fix
+[33macff6fd[m fix: llm context is fixed
+[33m2ac9001[m Change response method to use event.respond
+[33m6e7a04f[m fix: llm became girl
+[33m38b1fa0[m fix: strip to split
+[33m5df200f[m fix: shakh
+[33ma8674b7[m send message to shak
+[33m4e6107b[m send message to shak
+[33m73f0a8e[m fix: blabla
+[33maf1b56e[m fix: database
+[33m3fa202d[m fix: openai module's download
+[33ma303849[m fix: add llm.py
+[33m1547413[m fix: new docker
+[33m3184db4[m fix: change llm to gpt so free ram only can be used
+[33m900a2b8[m fix: add Base to database.py
+[33m74b20eb[m fix: add pool_pre_ping for supabase pooler
+[33m0eec6bb[m fix: run uvicorn in foreground with exec
+[33mfca5a37[m fix: use PORT env var and handle db connection error
+[33m0e1b0e1[m fix: run telethon in background task so uvicorn can bind port
+[33m17527a6[m fix: start uvicorn before pulling model
+[33mff7a68c[m add python-dotenv
+[33m0f9dcdf[m fix: add zstd for ollama install
+[33m8c03d27[m use environment variables for secrets
+[33m387b6c1[m remove .env from tracking
+[33m6e22e60[m initial commit

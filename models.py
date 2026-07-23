@@ -1,24 +1,15 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, Float, String, ForeignKey
 from database import Base
 
-class Todolist(Base):
-    __tablename__ = "todolist"
+class Contact(Base):
+    __tablename__ = "contacts"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer)
-    todo = Column(String)
-    dead_date = Column(String)
-    dead_time = Column(String)
-    importance = Column(Integer)
-    
-class Availabletime(Base):
-    __tablename__ = "availabletime"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer)
-    date = Column(String)
-    free_time_start = Column(String)
-    free_time_end = Column(String)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    display_name = Column(String)
+    email = Column(String)
+    source = Column(String)
+    confidence = Column(Float, default=1.0)
     
 class Communication(Base):
     __tablename__ = "communication"
