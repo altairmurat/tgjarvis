@@ -279,7 +279,7 @@ async def start_message(event):
 
 @client.on(events.NewMessage(pattern='/connectgmail'))
 async def connect_gmail(event):
-    link = f"https://твой-домен.onrender.com/gmail/connect/{event.sender_id}"
+    link = f"https://tgjarvis.onrender.com/gmail/connect/{event.sender_id}"
     await event.respond(f"Подключи свой Gmail по ссылке: {link}")
 
 @client.on(events.NewMessage(pattern='/sendShak'))
