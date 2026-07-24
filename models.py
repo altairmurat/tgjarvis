@@ -1,6 +1,12 @@
 from sqlalchemy import Column, Integer, Float, String, ForeignKey, Text, BigInteger
 from database import Base
 
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    telegram_user_id = Column(BigInteger, unique=True)
+    username = Column(String, nullable=True)
+
 class Contact(Base):
     __tablename__ = "contacts"
     
