@@ -1,4 +1,9 @@
+import os
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
 import asyncio
+import traceback
+import secrets, hashlib, base64
 from telethon import TelegramClient, events, Button
 from openai import AsyncOpenAI
 import datetime
@@ -43,14 +48,29 @@ CLIENT_CONFIG = {
 }
 
 
+pkce_store = {}  # telegram_user_id -> code_verifier, живёт только на время OAuth-хендшейка
+
+
+def generate_pkce_pair():
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode()
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return code_verifier, code_challenge
+
+
 def build_auth_url(telegram_user_id: int) -> str:
     """Генерирует ссылку для логина конкретного юзера. state = его telegram id,
     чтобы в callback знать, кому сохранять токен."""
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    code_verifier, code_challenge = generate_pkce_pair()
+    pkce_store[telegram_user_id] = code_verifier
     auth_url, _ = flow.authorization_url(
-        access_type="offline",      # обязательно для refresh_token
-        prompt="consent",           # обязательно чтобы refresh_token пришёл даже при повторном логине
+        access_type="offline",
+        prompt="consent",
         state=str(telegram_user_id),
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
     )
     return auth_url
 
@@ -101,21 +121,25 @@ async def gmail_connect(telegram_user_id: int):
 
 @app.get("/gmail/callback")
 async def gmail_callback(request: FastAPIRequest):
-    code = request.query_params.get("code")
-    telegram_user_id = int(request.query_params.get("state"))
-
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
-    flow.fetch_token(code=code)
-    creds = flow.credentials
-    save_user_token(telegram_user_id, creds)
-
-    # сообщаем в телеграм что готово
     try:
-        await client.send_message(telegram_user_id, "✅ Gmail подключен! Теперь можешь просить меня писать письма.")
-    except Exception:
-        pass
+        code = request.query_params.get("code")
+        telegram_user_id = int(request.query_params.get("state"))
 
-    return HTMLResponse("<h2>Готово! Можешь закрыть эту вкладку и вернуться в Telegram.</h2>")
+        flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        flow.code_verifier = pkce_store.pop(telegram_user_id, None)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        save_user_token(telegram_user_id, creds)
+
+        try:
+            await client.send_message(telegram_user_id, "✅ Gmail подключен! Теперь можешь просить меня писать письма.")
+        except Exception:
+            pass
+
+        return HTMLResponse("<h2>Готово! Можешь закрыть эту вкладку и вернуться в Telegram.</h2>")
+    except Exception as e:
+        print("GMAIL CALLBACK ERROR:", traceback.format_exc())  # смотри в Render Logs
+        return HTMLResponse(f"<h2>Ошибка: {e}</h2>", status_code=500)
 
 
 # ── email tool ──────────────────────────────────────────────────────
