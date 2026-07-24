@@ -192,7 +192,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
         )
         if not r.choices[0].message.tool_calls:
             return False
-        link = f"https://твой-домен.onrender.com/gmail/connect/{user_id}"
+        link = f"https://tgjarvis.onrender.com/gmail/connect/{user_id}"
         await event.reply(f"Сначала подключи Gmail: {link}")
         return True
 
