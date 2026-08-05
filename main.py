@@ -7,9 +7,10 @@ import secrets, hashlib, base64
 from telethon import TelegramClient, events, Button
 from openai import AsyncOpenAI
 import datetime
-import os, io, re, json, base64
+import io, re, json
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from fastapi import FastAPI, Request as FastAPIRequest
@@ -28,7 +29,7 @@ ai_client = AsyncOpenAI(api_key=OPENAI_API)
 user_states = {}
 pending_photos = {}
 pending_textvoice = {}
-draft_cache = {}  # {draft_id: telegram_user_id}  — чтобы знать, чьим gmail отправлять при нажатии кнопки
+draft_cache = {}  # {draft_id: telegram_user_id} — чтобы знать, чьим gmail отправлять при нажатии кнопки
 
 # ── Gmail OAuth config (Web app flow, не Desktop) ──────────────────
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -47,7 +48,6 @@ CLIENT_CONFIG = {
     }
 }
 
-
 pkce_store = {}  # telegram_user_id -> code_verifier, живёт только на время OAuth-хендшейка
 
 
@@ -57,7 +57,6 @@ def generate_pkce_pair():
         hashlib.sha256(code_verifier.encode()).digest()
     ).rstrip(b"=").decode()
     return code_verifier, code_challenge
-
 
 def build_auth_url(telegram_user_id: int) -> str:
     """Генерирует ссылку для логина конкретного юзера. state = его telegram id,
@@ -74,6 +73,19 @@ def build_auth_url(telegram_user_id: int) -> str:
     )
     return auth_url
 
+def delete_user_token(telegram_user_id: int):
+    """Очищает невалидный токен пользователя из базы данных."""
+    db = SessionLocal()
+    try:
+        acc = db.query(models.GoogleAccount).filter_by(telegram_user_id=telegram_user_id).first()
+        if acc:
+            acc.token_json = None
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error deleting token for {telegram_user_id}: {e}")
+    finally:
+        db.close()
 
 def save_user_token(telegram_user_id: int, creds: Credentials):
     db = SessionLocal()
@@ -87,9 +99,8 @@ def save_user_token(telegram_user_id: int, creds: Credentials):
     finally:
         db.close()
 
-
 def load_user_creds(telegram_user_id: int) -> Credentials | None:
-    """Достаёт токен юзера из БД, рефрешит если протух, сохраняет обратно если обновился."""
+    """Достаёт токен юзера из БД, рефрешит если протух, удаляет если invalid_grant."""
     db = SessionLocal()
     try:
         acc = db.query(models.GoogleAccount).filter_by(telegram_user_id=telegram_user_id).first()
@@ -97,27 +108,34 @@ def load_user_creds(telegram_user_id: int) -> Credentials | None:
             return None
         creds = Credentials.from_authorized_user_info(json.loads(acc.token_json))
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            acc.token_json = creds.to_json()
-            db.commit()
+            try:
+                creds.refresh(Request())
+                acc.token_json = creds.to_json()
+                db.commit()
+            except RefreshError as e:
+                print(f"Token refresh failed for {telegram_user_id}: {e}")
+                db.rollback()
+                delete_user_token(telegram_user_id)
+                return None
         return creds
+    except Exception as e:
+        print(f"Error loading creds for {telegram_user_id}: {e}")
+        return None
     finally:
         db.close()
 
-
 def get_gmail_client_for(telegram_user_id: int):
-    """None если юзер ещё не подключил Gmail."""
+    """None если юзер ещё не подключил Gmail или его токен сбросился."""
     creds = load_user_creds(telegram_user_id)
     if not creds:
         return None
     return build("gmail", "v1", credentials=creds)
 
-
 # ── OAuth HTTP routes (FastAPI, отдельно от Telethon) ──────────────
 @app.get("/gmail/connect/{telegram_user_id}")
 async def gmail_connect(telegram_user_id: int):
+    delete_user_token(telegram_user_id)
     return RedirectResponse(build_auth_url(telegram_user_id))
-
 
 @app.get("/gmail/callback")
 async def gmail_callback(request: FastAPIRequest):
@@ -138,9 +156,8 @@ async def gmail_callback(request: FastAPIRequest):
 
         return HTMLResponse("<h2>Готово! Можешь закрыть эту вкладку и вернуться в Telegram.</h2>")
     except Exception as e:
-        print("GMAIL CALLBACK ERROR:", traceback.format_exc())  # смотри в Render Logs
+        print("GMAIL CALLBACK ERROR:", traceback.format_exc())
         return HTMLResponse(f"<h2>Ошибка: {e}</h2>", status_code=500)
-
 
 # ── email tool ──────────────────────────────────────────────────────
 EMAIL_TOOLS = [{
@@ -160,7 +177,6 @@ EMAIL_TOOLS = [{
     },
 }]
 
-
 def find_email_in_history(gmail, name: str) -> str | None:
     res = gmail.users().messages().list(userId="me", q=f'"{name}"', maxResults=5).execute()
     for m in res.get("messages", []):
@@ -173,14 +189,12 @@ def find_email_in_history(gmail, name: str) -> str | None:
                 return match.group(0)
     return None
 
-
 def create_gmail_draft(gmail, to: str, subject: str, body: str) -> str:
     raw = base64.urlsafe_b64encode(
         f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode()
     ).decode()
     d = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return d["id"]
-
 
 async def generate_email_text(topic: str, recipient: str) -> tuple[str, str]:
     r = await ai_client.chat.completions.create(
@@ -193,7 +207,6 @@ async def generate_email_text(topic: str, recipient: str) -> tuple[str, str]:
     data = json.loads(r.choices[0].message.content)
     return data["subject"], data["body"]
 
-
 async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic):
     subject, body = await generate_email_text(topic, name)
     draft_id = create_gmail_draft(gmail, to_email, subject, body)
@@ -204,11 +217,10 @@ async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name,
                  Button.inline("❌ Отмена", f"cancel:{draft_id}")],
     )
 
-
 async def try_handle_email_intent(event, user_id: int, user_message: str) -> bool:
     gmail = get_gmail_client_for(user_id)
     if not gmail:
-        # проверяем вообще была ли это попытка написать письмо, прежде чем слать ссылку на коннект
+        # Проверяем намерение написать письмо перед отправкой ссылки
         r = await ai_client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": user_message}],
@@ -216,8 +228,8 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
         )
         if not r.choices[0].message.tool_calls:
             return False
-        link = f"https://tgjarvis.onrender.com/gmail/connect/{user_id}"
-        await event.reply(f"Сначала подключи Gmail: {link}")
+        auth_url = build_auth_url(user_id)
+        await event.reply(f"Сначала подключи (или переподключи) Gmail: {auth_url}")
         return True
 
     r = await ai_client.chat.completions.create(
@@ -232,15 +244,23 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
     args = json.loads(msg.tool_calls[0].function.arguments)
     name = args["recipient_name"]
     topic = args["topic"]
-    email = args.get("recipient_email") or find_email_in_history(gmail, name)
 
-    if not email:
-        # не нашли — просим прислать вручную, запоминаем что мы ждём от юзера именно email
-        user_states[user_id] = ("waiting_for_manual_email", name, topic)
-        await event.reply(f"Не нашёл email для {name}. Пришли его почту одним сообщением.")
-        return True
+    try:
+        email = args.get("recipient_email") or find_email_in_history(gmail, name)
 
-    await send_draft_to_telegram(event, gmail, user_id, email, name, topic)
+        if not email:
+            user_states[user_id] = ("waiting_for_manual_email", name, topic)
+            await event.reply(f"Не нашёл email для {name}. Пришли его почту одним сообщением.")
+            return True
+
+        await send_draft_to_telegram(event, gmail, user_id, email, name, topic)
+    except RefreshError:
+        delete_user_token(user_id)
+        auth_url = build_auth_url(user_id)
+        await event.reply(
+            "⚠️ Твой доступ к Gmail протух или был отозван.\n"
+            f"Пожалуйста, авторизуйся заново по ссылке: {auth_url}"
+        )
     return True
 
 
@@ -249,16 +269,33 @@ async def on_callback(event):
     action, draft_id = event.data.decode().split(":")
     telegram_user_id = draft_cache.get(draft_id)
     gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
+    
     if not gmail:
-        await event.edit("Ошибка: не найден Gmail аккаунт для этого черновика")
+        auth_url = build_auth_url(event.sender_id)
+        await event.edit(
+            "❌ Ошибка: Сессия Gmail не найдена или истёк токен.\n\n"
+            f"Авторизуйся заново по ссылке: {auth_url}"
+        )
         return
-    if action == "send":
-        gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute()
-        await event.edit("✅ Отправлено")
-    else:
-        gmail.users().drafts().delete(userId="me", id=draft_id).execute()
-        await event.edit("❌ Отменено")
-    draft_cache.pop(draft_id, None)
+
+    try:
+        if action == "send":
+            gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+            await event.edit("✅ Отправлено")
+        else:
+            gmail.users().drafts().delete(userId="me", id=draft_id).execute()
+            await event.edit("❌ Отменено")
+    except RefreshError:
+        delete_user_token(telegram_user_id)
+        auth_url = build_auth_url(telegram_user_id)
+        await event.edit(
+            "⚠️ Токен Gmail был отозван или протух.\n\n"
+            f"Пройди авторизацию заново по ссылке: {auth_url}"
+        )
+    except Exception as e:
+        await event.edit(f"Ошибка при выполнении действия: {e}")
+    finally:
+        draft_cache.pop(draft_id, None)
 
 # ── startup / shutdown ────────────────────────────────────────────
 @app.on_event("startup")
@@ -301,10 +338,16 @@ def get_current_datetime():
 async def start_message(event):
     await event.respond('Привет! Меня зовут Кристина, я твой полноценный ассистент, проси меня о чем угодно!')
 
-@client.on(events.NewMessage(pattern='/connectgmail'))
+@client.on(events.NewMessage(pattern=r'^/(connectgmail|reconnect)'))
 async def connect_gmail(event):
-    link = f"https://tgjarvis.onrender.com/gmail/connect/{event.sender_id}"
-    await event.respond(f"Подключи свой Gmail по ссылке: {link}")
+    user_id = event.sender_id
+    delete_user_token(user_id)
+    auth_url = build_auth_url(user_id)
+    await event.respond(
+        "⚠️ **Подключение / Переподключение Gmail**\n\n"
+        "Нажми на ссылку ниже, чтобы авторизоваться и привязать почту заново:\n"
+        f"{auth_url}"
+    )
 
 @client.on(events.NewMessage(pattern='/sendShak'))
 async def sendmessage(event):
@@ -317,10 +360,10 @@ async def necessary_task_handler(event):
     user_id = event.sender_id
     sender = await event.get_sender()
 
-    if event.text.startswith("/"):
+    if event.text and event.text.startswith("/"):
         return
 
-    # ждём что юзер вручную пришлёт email после того как мы не нашли его в истории
+    # Ждём что юзер вручную пришлёт email
     state = user_states.get(user_id)
     if isinstance(state, tuple) and state[0] == "waiting_for_manual_email":
         _, name, topic = state
@@ -328,12 +371,21 @@ async def necessary_task_handler(event):
         if email_match:
             gmail = get_gmail_client_for(user_id)
             del user_states[user_id]
-            await send_draft_to_telegram(event, gmail, user_id, email_match.group(0), name, topic)
+            if gmail:
+                try:
+                    await send_draft_to_telegram(event, gmail, user_id, email_match.group(0), name, topic)
+                except RefreshError:
+                    delete_user_token(user_id)
+                    auth_url = build_auth_url(user_id)
+                    await event.reply(f"Токен протух. Подключи Gmail заново: {auth_url}")
+            else:
+                auth_url = build_auth_url(user_id)
+                await event.reply(f"Сессия не найдена. Подключи Gmail заново: {auth_url}")
         else:
             await event.reply("Это не похоже на email, попробуй ещё раз")
         return
 
-    elif event.text.startswith("!"):
+    elif event.text and event.text.startswith("!"):
         if user_id in user_states:
             if user_states[user_id] == "waiting_for_submitmessage":
                 message_tosend = event.text.split("/")
@@ -368,13 +420,13 @@ async def necessary_task_handler(event):
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
 
-        if event.photo:
+        elif event.photo:
             pending_photos[user_id] = event.message
             user_states[user_id] = "waiting_for_imageprompt"
             await event.respond("Получила вашу фотку! Что я должна сделать?")
             return
 
-        if user_id in user_states and user_states[user_id] == "waiting_for_imageprompt":
+        elif user_id in user_states and user_states[user_id] == "waiting_for_imageprompt":
             if event.text:
                 user_prompt = event.text
                 photo_message = pending_photos.get(user_id)
@@ -390,11 +442,13 @@ async def necessary_task_handler(event):
                 return
         else:
             user_message = event.text
+            if not user_message:
+                return
             try:
                 handled = await try_handle_email_intent(event, user_id, user_message)
                 if not handled:
                     response = ask_gpt(chat_text=user_message)
                     await event.respond(response)
-                    save_communication(sender.username, user_message)
+                    save_communication(sender.username if sender else None, user_message)
             except Exception as e:
                 await event.respond(f"Не получилось обработать сообщение. Ошибка: {e}")
