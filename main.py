@@ -171,6 +171,7 @@ EMAIL_TOOLS = [{
                 "recipient_name": {"type": "string", "description": "Имя получателя латиницей, стандартный вид"},
                 "recipient_email": {"type": "string", "description": "Email получателя, если пользователь его явно указал в сообщении, иначе пусто"},
                 "topic": {"type": "string", "description": "О чём письмо"},
+                "sender_name": {"type": "string", "description": "Имя отправителя латиницей, напиши от имени пользователя, он должен был в своем промпте это указать"},
             },
             "required": ["recipient_name", "topic"],
         },
