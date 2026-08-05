@@ -197,19 +197,19 @@ def create_gmail_draft(gmail, to: str, subject: str, body: str) -> str:
     d = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return d["id"]
 
-async def generate_email_text(topic: str, recipient: str) -> tuple[str, str]:
+async def generate_email_text(topic: str, recipient: str, sendername: str) -> tuple[str, str, str]:
     r = await ai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content":
-            f"Напиши email на английском, получатель: {recipient}. Тема сообщения: {topic}. "
+            f"Напиши email на английском, получатель: {recipient}. Тема сообщения: {topic}. Имя отправителя: {sendername}."
             f"Ответь строго JSON: {{\"subject\": \"...\", \"body\": \"...\"}}"}],
         response_format={"type": "json_object"},
     )
     data = json.loads(r.choices[0].message.content)
     return data["subject"], data["body"]
 
-async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic):
-    subject, body = await generate_email_text(topic, name)
+async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic, sendername):
+    subject, body = await generate_email_text(topic, name, sendername)
     draft_id = create_gmail_draft(gmail, to_email, subject, body)
     draft_cache[draft_id] = telegram_user_id
     await event.reply(
@@ -245,6 +245,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
     args = json.loads(msg.tool_calls[0].function.arguments)
     name = args["recipient_name"]
     topic = args["topic"]
+    sendername = args["sender_name"]
 
     try:
         email = args.get("recipient_email") or find_email_in_history(gmail, name)
@@ -254,7 +255,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
             await event.reply(f"Не нашёл email для {name}. Пришли его почту одним сообщением.")
             return True
 
-        await send_draft_to_telegram(event, gmail, user_id, email, name, topic)
+        await send_draft_to_telegram(event, gmail, user_id, email, name, topic, sendername)
     except RefreshError:
         delete_user_token(user_id)
         auth_url = build_auth_url(user_id)
