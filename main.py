@@ -224,21 +224,20 @@ async def generate_email_text(topic: str, recipient: str, sendername: str) -> tu
     return data["subject"], data["body"]
 
 
-def get_formatted_webapp_url(draft_id: str) -> str:
-    """Формирует HTTPS URL для Telegram Mini App."""
+def get_formatted_webapp_url(draft_id: str, message_id: int = 0) -> str:
+    """Формирует HTTPS URL для Telegram Mini App с ID сообщения."""
     base_url = WEBAPP_URL.strip().rstrip("/")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
-    return f"{base_url}/webapp?draft_id={draft_id}"
+    return f"{base_url}/webapp?draft_id={draft_id}&message_id={message_id}"
 
 
-def make_draft_keyboard(draft_id: str):
+def make_draft_keyboard(draft_id: str, message_id: int):
     """Создаёт инлайн-клавиатуру с Mini App кнопкой для редактирования."""
-    webapp_url = get_formatted_webapp_url(draft_id)
+    webapp_url = get_formatted_webapp_url(draft_id, message_id)
     return [
         [Button.inline("✅ Отправить", f"send:{draft_id}"),
          Button.inline("❌ Отмена", f"cancel:{draft_id}")],
-        # Кнопка типа KeyboardButtonWebView открывает Mini App прямо в Telegram
         [types.KeyboardButtonWebView("✏️ Изменить текст", url=webapp_url)]
     ]
 
@@ -250,9 +249,13 @@ async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name,
     text_cache[draft_id] = body 
     
     display_text = f"📧 Черновик для {name} ({to_email})\n\nТема: {subject}\n\n{body}"
-    buttons = make_draft_keyboard(draft_id)
     
-    await event.reply(display_text, buttons=buttons)
+    # Сначала отправляем письмо без кнопок, чтобы получить message.id
+    msg = await event.reply(display_text)
+    
+    # Переприкрепляем кнопки с полученным message.id
+    buttons = make_draft_keyboard(draft_id, msg.id)
+    await msg.edit(display_text, buttons=buttons)
 
 
 async def try_handle_email_intent(event, user_id: int, user_message: str) -> bool:
@@ -394,7 +397,7 @@ async def get_text(draft_id: str):
 
 
 @app.get("/webapp", response_class=HTMLResponse)
-async def get_webapp(draft_id: str = ""):
+async def get_webapp(draft_id: str = "", message_id: int = 0):
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -438,6 +441,7 @@ async def get_webapp(draft_id: str = ""):
 
             const urlParams = new URLSearchParams(window.location.search);
             const draftId = urlParams.get('draft_id');
+            const messageId = parseInt(urlParams.get('message_id') || "0");
 
             async function loadText() {{
                 try {{
@@ -459,7 +463,7 @@ async def get_webapp(draft_id: str = ""):
                     headers: {{ 'Content-Type': 'application/json' }},
                     body: JSON.stringify({{
                         chat_id: user_id,
-                        message_id: 0,
+                        message_id: messageId,
                         draft_id: draftId,
                         new_text: updatedText
                     }})
@@ -482,23 +486,34 @@ async def get_webapp(draft_id: str = ""):
 async def update_draft(data: EditDraftModel):
     text_cache[data.draft_id] = data.new_text
     
-    # Обновляем черновик в Gmail
     telegram_user_id = draft_cache.get(data.draft_id) or data.chat_id
     gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
     
+    subject_val = "Без темы"
+    to_val = ""
+    
     if gmail:
         try:
-            # Получаем старый черновик, чтобы сохранить тему и адресата
+            # Получаем тему и получателя из существующего черновика Gmail
             draft_info = gmail.users().drafts().get(userId="me", id=data.draft_id, format="full").execute()
             headers = draft_info["message"]["payload"]["headers"]
             to_val = next((h["value"] for h in headers if h["name"].lower() == "to"), "")
             subject_val = next((h["value"] for h in headers if h["name"].lower() == "subject"), "Без темы")
             
-            # Пересоздаем сырое письмо с новым текстом
+            # Пересоздаем и обновляем черновик в Gmail
             raw = base64.urlsafe_b64encode(f"To: {to_val}\r\nSubject: {subject_val}\r\n\r\n{data.new_text}".encode()).decode()
             gmail.users().drafts().update(userId="me", id=data.draft_id, body={"message": {"raw": raw}}).execute()
         except Exception as e:
             print(f"Error updating Gmail draft: {e}")
+
+    # Мгновенно обновляем текст и клавиатуру прямо в чате Telegram
+    if data.message_id != 0 and telegram_user_id:
+        try:
+            new_display_text = f"📧 Черновик для {to_val}\n\nТема: {subject_val}\n\n{data.new_text}"
+            buttons = make_draft_keyboard(data.draft_id, data.message_id)
+            await client.edit_message(telegram_user_id, data.message_id, new_display_text, buttons=buttons)
+        except Exception as e:
+            print(f"Error editing Telegram message: {e}")
 
     return {"status": "success"}
 
