@@ -226,10 +226,12 @@ async def generate_email_text(topic: str, recipient: str, sendername: str) -> tu
 
 def get_formatted_webapp_url(draft_id: str) -> str:
     """Гарантирует валидный https URL для WebApp."""
-    base_url = WEBAPP_URL.strip()
+    base_url = WEBAPP_URL.strip().rstrip("/")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
-    return f"{base_url}?draft_id={draft_id}"
+    
+    # Добавляем /webapp перед query-параметрами
+    return f"{base_url}/webapp?draft_id={draft_id}"
 
 
 async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic, sendername):
