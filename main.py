@@ -170,7 +170,7 @@ async def gmail_callback(request: FastAPIRequest):
 
 
 # =====================================================================
-# EMAIL DRAFTING
+# EMAIL DRAFTING & KEYBOARD HELPER
 # =====================================================================
 
 EMAIL_TOOLS = [{
@@ -225,13 +225,22 @@ async def generate_email_text(topic: str, recipient: str, sendername: str) -> tu
 
 
 def get_formatted_webapp_url(draft_id: str) -> str:
-    """Гарантирует валидный https URL для WebApp."""
+    """Формирует HTTPS URL для Telegram Mini App."""
     base_url = WEBAPP_URL.strip().rstrip("/")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
-    
-    # Добавляем /webapp перед query-параметрами
     return f"{base_url}/webapp?draft_id={draft_id}"
+
+
+def make_draft_keyboard(draft_id: str):
+    """Создаёт инлайн-клавиатуру с Mini App кнопкой для редактирования."""
+    webapp_url = get_formatted_webapp_url(draft_id)
+    return [
+        [Button.inline("✅ Отправить", f"send:{draft_id}"),
+         Button.inline("❌ Отмена", f"cancel:{draft_id}")],
+        # Кнопка типа KeyboardButtonWebView открывает Mini App прямо в Telegram
+        [types.KeyboardButtonWebView("✏️ Изменить текст", url=webapp_url)]
+    ]
 
 
 async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic, sendername):
@@ -241,15 +250,7 @@ async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name,
     text_cache[draft_id] = body 
     
     display_text = f"📧 Черновик для {name} ({to_email})\n\nТема: {subject}\n\n{body}"
-    
-    webapp_url = get_formatted_webapp_url(draft_id)
-    
-    # Для Инлайн-кнопок используем Button.url или Button.switch_inline / Button.inline
-    buttons = [
-        [Button.inline("✅ Отправить", f"send:{draft_id}"),
-         Button.inline("❌ Отмена", f"cancel:{draft_id}")],
-        [Button.url("✏️ Изменить текст", webapp_url)]
-    ]
+    buttons = make_draft_keyboard(draft_id)
     
     await event.reply(display_text, buttons=buttons)
 
@@ -296,7 +297,11 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
 
 @client.on(events.CallbackQuery)
 async def on_callback(event):
-    action, draft_id = event.data.decode().split(":")
+    data = event.data.decode()
+    if ":" not in data:
+        return
+        
+    action, draft_id = data.split(":")
     telegram_user_id = draft_cache.get(draft_id)
     gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
 
@@ -372,7 +377,7 @@ def get_current_datetime():
     return [current_date, current_time]
 
 # =====================================================================
-# EMAIL DRAFT EDITOR HANDLER (WebApp Endpoints)
+# EMAIL DRAFT EDITOR HANDLER (Mini App Endpoints)
 # =====================================================================
 
 class EditDraftModel(BaseModel):
@@ -395,7 +400,7 @@ async def get_webapp(draft_id: str = ""):
     <html>
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <style>
             body {{
@@ -404,11 +409,14 @@ async def get_webapp(draft_id: str = ""):
                 color: var(--tg-theme-text-color, #000000);
                 margin: 0; padding: 15px; display: flex; flex-direction: column; height: 90vh;
             }}
+            h3 {{
+                margin-top: 0;
+            }}
             textarea {{
                 width: 100%; flex-grow: 1;
                 background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
                 color: var(--tg-theme-text-color, #000000);
-                border: 1px solid #ccc; border-radius: 8px; padding: 10px; font-size: 14px; box-sizing: border-box; resize: none;
+                border: 1px solid #ccc; border-radius: 8px; padding: 10px; font-size: 15px; box-sizing: border-box; resize: none;
             }}
             button {{
                 margin-top: 15px; padding: 12px;
@@ -425,27 +433,32 @@ async def get_webapp(draft_id: str = ""):
 
         <script>
             const tg = window.Telegram.WebApp;
+            tg.ready();
             tg.expand();
 
             const urlParams = new URLSearchParams(window.location.search);
             const draftId = urlParams.get('draft_id');
 
             async function loadText() {{
-                const response = await fetch('/get-text?draft_id=' + draftId);
-                const data = await response.json();
-                document.getElementById('email-text').value = data.text;
+                try {{
+                    const response = await fetch('/get-text?draft_id=' + draftId);
+                    const data = await response.json();
+                    document.getElementById('email-text').value = data.text;
+                }} catch(e) {{
+                    document.getElementById('email-text').value = "Ошибка загрузки текста";
+                }}
             }}
             loadText();
 
             document.getElementById('save-btn').addEventListener('click', async () => {{
                 const updatedText = document.getElementById('email-text').value;
-                const chat_id = tg.initDataUnsafe.chat?.id || tg.initDataUnsafe.user?.id;
+                const user_id = tg.initDataUnsafe.user?.id || 0;
 
                 const response = await fetch('/update-draft', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
                     body: JSON.stringify({{
-                        chat_id: chat_id,
+                        chat_id: user_id,
                         message_id: 0,
                         draft_id: draftId,
                         new_text: updatedText
@@ -468,18 +481,25 @@ async def get_webapp(draft_id: str = ""):
 @app.post("/update-draft")
 async def update_draft(data: EditDraftModel):
     text_cache[data.draft_id] = data.new_text
-    display_text = data.new_text 
     
-    webapp_url = get_formatted_webapp_url(data.draft_id)
+    # Обновляем черновик в Gmail
+    telegram_user_id = draft_cache.get(data.draft_id) or data.chat_id
+    gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
     
-    buttons = [
-        [Button.inline("✅ Отправить", f"send:{data.draft_id}"),
-         Button.inline("❌ Отмена", f"cancel:{data.draft_id}")],
-        [Button.url("✏️ Изменить текст", webapp_url)]
-    ]
-    
-    if data.message_id != 0:
-        await client.edit_message(data.chat_id, data.message_id, display_text, buttons=buttons)
+    if gmail:
+        try:
+            # Получаем старый черновик, чтобы сохранить тему и адресата
+            draft_info = gmail.users().drafts().get(userId="me", id=data.draft_id, format="full").execute()
+            headers = draft_info["message"]["payload"]["headers"]
+            to_val = next((h["value"] for h in headers if h["name"].lower() == "to"), "")
+            subject_val = next((h["value"] for h in headers if h["name"].lower() == "subject"), "Без темы")
+            
+            # Пересоздаем сырое письмо с новым текстом
+            raw = base64.urlsafe_b64encode(f"To: {to_val}\r\nSubject: {subject_val}\r\n\r\n{data.new_text}".encode()).decode()
+            gmail.users().drafts().update(userId="me", id=data.draft_id, body={"message": {"raw": raw}}).execute()
+        except Exception as e:
+            print(f"Error updating Gmail draft: {e}")
+
     return {"status": "success"}
 
 
