@@ -4,6 +4,7 @@ os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 import asyncio
 import traceback
 import secrets, hashlib, base64
+from email.message import EmailMessage
 from telethon import TelegramClient, events, Button, types
 from openai import AsyncOpenAI
 import datetime
@@ -207,7 +208,12 @@ def find_email_in_history(gmail, name: str) -> str | None:
 
 
 def create_gmail_draft(gmail, to: str, subject: str, body: str) -> str:
-    raw = base64.urlsafe_b64encode(f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode()).decode()
+    msg = EmailMessage()
+    msg['To'] = to
+    msg['Subject'] = subject
+    msg.set_content(body, charset='utf-8')
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     draft = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return draft["id"]
 
@@ -250,10 +256,10 @@ async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name,
     
     display_text = f"📧 Черновик для {name} ({to_email})\n\nТема: {subject}\n\n{body}"
     
-    # Сначала отправляем письмо без кнопок, чтобы получить message.id
+    # Сначала отправляем сообщение, чтобы зафиксировать message.id
     msg = await event.reply(display_text)
     
-    # Переприкрепляем кнопки с полученным message.id
+    # Редактируем сообщение, навешивая клавиатуру с message.id
     buttons = make_draft_keyboard(draft_id, msg.id)
     await msg.edit(display_text, buttons=buttons)
 
@@ -494,19 +500,24 @@ async def update_draft(data: EditDraftModel):
     
     if gmail:
         try:
-            # Получаем тему и получателя из существующего черновика Gmail
+            # Получаем тему и получателя из черновика
             draft_info = gmail.users().drafts().get(userId="me", id=data.draft_id, format="full").execute()
             headers = draft_info["message"]["payload"]["headers"]
             to_val = next((h["value"] for h in headers if h["name"].lower() == "to"), "")
             subject_val = next((h["value"] for h in headers if h["name"].lower() == "subject"), "Без темы")
             
-            # Пересоздаем и обновляем черновик в Gmail
-            raw = base64.urlsafe_b64encode(f"To: {to_val}\r\nSubject: {subject_val}\r\n\r\n{data.new_text}".encode()).decode()
+            # Собираем MIME-сообщение с гарантированным UTF-8
+            msg = EmailMessage()
+            msg['To'] = to_val
+            msg['Subject'] = subject_val
+            msg.set_content(data.new_text, charset='utf-8')
+            
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
             gmail.users().drafts().update(userId="me", id=data.draft_id, body={"message": {"raw": raw}}).execute()
         except Exception as e:
             print(f"Error updating Gmail draft: {e}")
 
-    # Мгновенно обновляем текст и клавиатуру прямо в чате Telegram
+    # Мгновенно обновляем текст и клавиатуру в Telegram
     if data.message_id != 0 and telegram_user_id:
         try:
             new_display_text = f"📧 Черновик для {to_val}\n\nТема: {subject_val}\n\n{data.new_text}"
