@@ -14,11 +14,10 @@ from google.auth.exceptions import RefreshError
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from fastapi import FastAPI, Request as FastAPIRequest
-from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse, HTMLResponse
 import urllib.parse
 
-from env import API_ID, API_HASH, BOT_TOKEN, OPENAI_API, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI, WEBAPP_URL
+from env import API_ID, API_HASH, BOT_TOKEN, OPENAI_API, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI
 from llm import ask_gpt, process_telegram_image
 from database import SessionLocal, engine
 import models
@@ -31,13 +30,14 @@ ai_client = AsyncOpenAI(api_key=OPENAI_API)
 user_states = {}
 pending_photos = {}
 pending_textvoice = {}
-draft_cache = {}  # {draft_id: telegram_user_id}
-text_cache = {}   # {draft_id: email_body}
+draft_cache = {}  # {draft_id: telegram_user_id} — чтобы знать, чьим gmail отправлять при нажатии кнопки
 
 
 # =====================================================================
 # GMAIL OAUTH (Web app flow + PKCE)
 # =====================================================================
+# Flow: /gmail/connect/<id> -> Google consent screen -> /gmail/callback
+# -> token saved in DB, tied to the telegram_user_id via the `state` param.
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.compose",
           "https://www.googleapis.com/auth/gmail.readonly"]
@@ -52,16 +52,19 @@ CLIENT_CONFIG = {
     }
 }
 
-pkce_store = {}
+pkce_store = {}  # telegram_user_id -> code_verifier, живёт только на время OAuth-хендшейка
 
 
 def generate_pkce_pair():
+    """Standard S256 PKCE pair: a random verifier + its sha256 challenge."""
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode()
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     return verifier, challenge
 
 
 def build_auth_url(telegram_user_id: int) -> str:
+    """Build a per-user Google consent URL. `state` carries the telegram id
+    so the callback knows whose token it just received."""
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     verifier, challenge = generate_pkce_pair()
     pkce_store[telegram_user_id] = verifier
@@ -80,6 +83,7 @@ def build_auth_url(telegram_user_id: int) -> str:
 # =====================================================================
 
 def delete_user_token(telegram_user_id: int):
+    """Wipe a user's stored token (used on reconnect, or when Google says invalid_grant)."""
     db = SessionLocal()
     try:
         acc = db.query(models.GoogleAccount).filter_by(telegram_user_id=telegram_user_id).first()
@@ -94,6 +98,7 @@ def delete_user_token(telegram_user_id: int):
 
 
 def save_user_token(telegram_user_id: int, creds: Credentials):
+    """Create/update the DB row holding this user's Gmail credentials."""
     db = SessionLocal()
     try:
         acc = db.query(models.GoogleAccount).filter_by(telegram_user_id=telegram_user_id).first()
@@ -107,6 +112,8 @@ def save_user_token(telegram_user_id: int, creds: Credentials):
 
 
 def load_user_creds(telegram_user_id: int) -> Credentials | None:
+    """Fetch the user's token from DB, auto-refresh if expired,
+    and drop it if the refresh fails (revoked access)."""
     db = SessionLocal()
     try:
         acc = db.query(models.GoogleAccount).filter_by(telegram_user_id=telegram_user_id).first()
@@ -133,22 +140,24 @@ def load_user_creds(telegram_user_id: int) -> Credentials | None:
 
 
 def get_gmail_client_for(telegram_user_id: int):
+    """Ready-to-use Gmail API client, or None if the user isn't connected."""
     creds = load_user_creds(telegram_user_id)
     return build("gmail", "v1", credentials=creds) if creds else None
 
 
 # =====================================================================
-# OAuth HTTP routes (FastAPI)
+# OAuth HTTP routes (FastAPI, separate from the Telethon bot)
 # =====================================================================
 
 @app.get("/gmail/connect/{telegram_user_id}")
 async def gmail_connect(telegram_user_id: int):
-    delete_user_token(telegram_user_id)
+    delete_user_token(telegram_user_id)  # force a fresh consent/token each time
     return RedirectResponse(build_auth_url(telegram_user_id))
 
 
 @app.get("/gmail/callback")
 async def gmail_callback(request: FastAPIRequest):
+    """Google redirects here after the user approves access."""
     try:
         code = request.query_params.get("code")
         telegram_user_id = int(request.query_params.get("state"))
@@ -161,16 +170,15 @@ async def gmail_callback(request: FastAPIRequest):
         try:
             await client.send_message(telegram_user_id, "✅ Gmail подключен! Теперь можешь просить меня писать письма.")
         except Exception:
-            pass
+            pass  # bot may not be able to DM the user yet, not fatal
 
         return HTMLResponse("<h2>Готово! Можешь закрыть эту вкладку и вернуться в Telegram.</h2>")
     except Exception as e:
         print("GMAIL CALLBACK ERROR:", traceback.format_exc())
         return HTMLResponse(f"<h2>Ошибка: {e}</h2>", status_code=500)
 
-
 # =====================================================================
-# EMAIL DRAFTING
+# EMAIL DRAFTING (LLM tool-call -> find recipient -> Gmail draft -> confirm)
 # =====================================================================
 
 EMAIL_TOOLS = [{
@@ -193,6 +201,7 @@ EMAIL_TOOLS = [{
 
 
 def find_email_in_history(gmail, name: str) -> str | None:
+    """Best-effort search of the user's own Gmail history for `name`'s address."""
     res = gmail.users().messages().list(userId="me", q=f'"{name}"', maxResults=5).execute()
     for m in res.get("messages", []):
         msg = gmail.users().messages().get(
@@ -207,12 +216,14 @@ def find_email_in_history(gmail, name: str) -> str | None:
 
 
 def create_gmail_draft(gmail, to: str, subject: str, body: str) -> str:
+    """Create a Gmail draft (not sent yet) and return its draft id."""
     raw = base64.urlsafe_b64encode(f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode()).decode()
     draft = gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return draft["id"]
 
 
-async def generate_email_text(topic: str, recipient: str, sendername: str) -> tuple[str, str]:
+async def generate_email_text(topic: str, recipient: str, sendername: str) -> tuple[str, str, str]:
+    """Ask GPT to write the subject + body for this email."""
     r = await ai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content":
@@ -224,35 +235,27 @@ async def generate_email_text(topic: str, recipient: str, sendername: str) -> tu
     return data["subject"], data["body"]
 
 
-def get_formatted_webapp_url(draft_id: str) -> str:
-    """Гарантирует валидный https URL для WebApp."""
-    base_url = WEBAPP_URL.strip()
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = f"https://{base_url}"
-    return f"{base_url}?draft_id={draft_id}"
-
-
 async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic, sendername):
+    """Generate the email text, save it as a Gmail draft, and show it to the
+    user in Telegram with Send/Cancel buttons."""
     subject, body = await generate_email_text(topic, name, sendername)
     draft_id = create_gmail_draft(gmail, to_email, subject, body)
-    draft_cache[draft_id] = telegram_user_id  
-    text_cache[draft_id] = body 
-    
-    display_text = f"📧 Черновик для {name} ({to_email})\n\nТема: {subject}\n\n{body}"
-    
-    webapp_url = get_formatted_webapp_url(draft_id)
-    
-    # Для Инлайн-кнопок используем Button.url или Button.switch_inline / Button.inline
-    buttons = [
-        [Button.inline("✅ Отправить", f"send:{draft_id}"),
-         Button.inline("❌ Отмена", f"cancel:{draft_id}")],
-        [Button.url("✏️ Изменить текст", webapp_url)]
-    ]
-    
-    await event.reply(display_text, buttons=buttons)
+    draft_cache[draft_id] = telegram_user_id  # remember who this draft belongs to, for the button callback
+    await event.reply(
+        f"📧 Черновик для {name} ({to_email})\n\nТема: {subject}\n\n{body}",
+        buttons=[Button.inline("✅ Отправить", f"send:{draft_id}"),
+                 Button.inline("❌ Отмена", f"cancel:{draft_id}")],
+    )
 
 
 async def try_handle_email_intent(event, user_id: int, user_message: str) -> bool:
+    """
+    Entry point for "does this message want me to send an email?".
+    Returns True if the message was handled as an email request (whatever the
+    outcome - draft sent, asked for auth, asked for the recipient's email...),
+    False if it should fall through to the normal chat flow.
+    """
+    # Ask the model once: is this an email request, and if so, with what details?
     r = await ai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": user_message}],
@@ -260,10 +263,11 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
     )
     msg = r.choices[0].message
     if not msg.tool_calls:
-        return False
+        return False  # not an email request
 
     gmail = get_gmail_client_for(user_id)
     if not gmail:
+        # User needs to (re)connect Gmail before we can do anything
         auth_url = build_auth_url(user_id)
         await event.reply(f"Сначала подключи (или переподключи) Gmail: {auth_url}")
         return True
@@ -274,6 +278,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
     sendername = args.get("sender_name") or "Имя отсутствует, просто отправь без учета имени"
 
     try:
+        # Prefer an email address the user gave explicitly, else search Gmail history
         email = args.get("recipient_email") or find_email_in_history(gmail, name)
 
         if not email:
@@ -283,6 +288,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
 
         await send_draft_to_telegram(event, gmail, user_id, email, name, topic, sendername)
     except RefreshError:
+        # Gmail access was revoked/expired mid-flow
         delete_user_token(user_id)
         auth_url = build_auth_url(user_id)
         await event.reply(
@@ -294,6 +300,7 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
 
 @client.on(events.CallbackQuery)
 async def on_callback(event):
+    """Handles the ✅ Отправить / ❌ Отмена buttons under a draft preview."""
     action, draft_id = event.data.decode().split(":")
     telegram_user_id = draft_cache.get(draft_id)
     gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
@@ -369,117 +376,6 @@ def get_current_datetime():
     current_date, current_time = current_datetime[0], current_datetime[1][:5]
     return [current_date, current_time]
 
-# =====================================================================
-# EMAIL DRAFT EDITOR HANDLER (WebApp Endpoints)
-# =====================================================================
-
-class EditDraftModel(BaseModel):
-    chat_id: int
-    message_id: int
-    draft_id: str
-    new_text: str
-
-
-@app.get("/get-text")
-async def get_text(draft_id: str):
-    body_text = text_cache.get(draft_id, "Текст не найден или устарел")
-    return {"text": body_text}
-
-
-@app.get("/webapp", response_class=HTMLResponse)
-async def get_webapp(draft_id: str = ""):
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <script src="https://telegram.org/js/telegram-web-app.js"></script>
-        <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                background-color: var(--tg-theme-bg-color, #ffffff);
-                color: var(--tg-theme-text-color, #000000);
-                margin: 0; padding: 15px; display: flex; flex-direction: column; height: 90vh;
-            }}
-            textarea {{
-                width: 100%; flex-grow: 1;
-                background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
-                color: var(--tg-theme-text-color, #000000);
-                border: 1px solid #ccc; border-radius: 8px; padding: 10px; font-size: 14px; box-sizing: border-box; resize: none;
-            }}
-            button {{
-                margin-top: 15px; padding: 12px;
-                background-color: var(--tg-theme-button-color, #2481cc);
-                color: var(--tg-theme-button-text-color, #ffffff);
-                border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer;
-            }}
-        </style>
-    </head>
-    <body>
-        <h3>Редактирование письма</h3>
-        <textarea id="email-text" placeholder="Загрузка текста..."></textarea>
-        <button id="save-btn">Сохранить изменения</button>
-
-        <script>
-            const tg = window.Telegram.WebApp;
-            tg.expand();
-
-            const urlParams = new URLSearchParams(window.location.search);
-            const draftId = urlParams.get('draft_id');
-
-            async function loadText() {{
-                const response = await fetch('/get-text?draft_id=' + draftId);
-                const data = await response.json();
-                document.getElementById('email-text').value = data.text;
-            }}
-            loadText();
-
-            document.getElementById('save-btn').addEventListener('click', async () => {{
-                const updatedText = document.getElementById('email-text').value;
-                const chat_id = tg.initDataUnsafe.chat?.id || tg.initDataUnsafe.user?.id;
-
-                const response = await fetch('/update-draft', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{
-                        chat_id: chat_id,
-                        message_id: 0,
-                        draft_id: draftId,
-                        new_text: updatedText
-                    }})
-                }});
-
-                if (response.ok) {{
-                    tg.close();
-                }} else {{
-                    alert("Ошибка сохранения!");
-                }}
-            }});
-        </script>
-    </body>
-    </html>
-    """
-    return html_content
-
-
-@app.post("/update-draft")
-async def update_draft(data: EditDraftModel):
-    text_cache[data.draft_id] = data.new_text
-    display_text = data.new_text 
-    
-    webapp_url = get_formatted_webapp_url(data.draft_id)
-    
-    buttons = [
-        [Button.inline("✅ Отправить", f"send:{data.draft_id}"),
-         Button.inline("❌ Отмена", f"cancel:{data.draft_id}")],
-        [Button.url("✏️ Изменить текст", webapp_url)]
-    ]
-    
-    if data.message_id != 0:
-        await client.edit_message(data.chat_id, data.message_id, display_text, buttons=buttons)
-    return {"status": "success"}
-
 
 # =====================================================================
 # TELEGRAM HANDLERS
@@ -517,6 +413,7 @@ async def necessary_task_handler(event):
     if event.text and event.text.startswith("/"):
         return
 
+    # Waiting for the user to manually type a recipient's email address
     state = user_states.get(user_id)
     if isinstance(state, tuple) and state[0] == "waiting_for_manual_email":
         _, name, topic, sendername = state
