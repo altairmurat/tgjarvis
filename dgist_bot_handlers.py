@@ -51,7 +51,7 @@ from dgist_accounts import (
 _active_portal_checks: set[int] = set()
 
 # Автоматическая проверка портала каждые 5 часов.
-AUTO_CHECK_INTERVAL_SEC = 5 * 60 * 60
+AUTO_CHECK_INTERVAL_SEC = 5 * 60
 
 # Фоновая задача автопроверки.
 _auto_monitor_task = None
