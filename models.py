@@ -30,3 +30,16 @@ class Communication(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String)
     usermessage = Column(String)
+    
+class DgistAccount(Base):
+    __tablename__ = "dgist_accounts"
+
+    id = Column(Integer, primary_key=True)
+    telegram_user_id = Column(BigInteger, unique=True, index=True)
+
+    dgist_username = Column(String)              # логин от портала — не секрет, не шифруем
+    dgist_password_enc = Column(Text)             # ЗАШИФРОВАНО через crypto_utils.encrypt()
+
+    email_address = Column(String)                # почта, куда приходит код — не секрет
+    email_app_password_enc = Column(Text)          # ЗАШИФРОВАНО
+    email_imap_host = Column(String, default="imap.gmail.com")

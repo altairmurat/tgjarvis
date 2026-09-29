@@ -23,6 +23,9 @@ from env import API_ID, API_HASH, BOT_TOKEN, OPENAI_API, GOOGLE_CLIENT_ID, GOOGL
 from llm import ask_gpt, process_telegram_image
 from database import SessionLocal, engine
 import models
+import auto_login
+import dgist_monitor
+from dgist_bot_handlers import register_dgist_handlers, handle_dgist_conversation_step
 
 app = FastAPI()
 
@@ -354,6 +357,7 @@ async def startup_event():
     except Exception as e:
         print(f"DB init error: {e}")
     await client.start(bot_token=BOT_TOKEN)
+    register_dgist_handlers(client, user_states)   # <-- ВСТАВИТЬ ЭТУ СТРОКУ
     asyncio.create_task(client.run_until_disconnected())
 
 @app.on_event("shutdown")
@@ -566,6 +570,10 @@ async def necessary_task_handler(event):
         return
 
     state = user_states.get(user_id)
+    
+    if await handle_dgist_conversation_step(event, user_id, state, user_states):
+        return                                             # <-- ВСТАВИТЬ
+    
     if isinstance(state, tuple) and state[0] == "waiting_for_manual_email":
         _, name, topic, sendername = state
         email_match = re.search(r"[\w.+-]+@[\w.-]+", event.text or "")

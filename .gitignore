@@ -1,15 +1,56 @@
-# Секреты и ключи
+# Secrets
 .env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# DGIST sessions / cookies / browser
+user_data/
+browser_profile/
+session_cookie.txt
+debug_listbbs.html
+
+# Playwright
+playwright-report/
+test-results/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
 credentials.json
-tokens.json
+.env
+*.env
 
-# Сессии Telegram
-*.session
-*.session-journal
+user_data/
+browser_profile/
 
-# Кэш Python
 __pycache__/
 *.pyc
 
-# Системные файлы
-.DS_Store
+*.db
+*.sqlite
+*.sqlite3
+
+debug_listbbs.html
+session_cookie.txt
