@@ -364,12 +364,6 @@ async def startup_event():
 
     asyncio.create_task(client.run_until_disconnected())
 
-    print("[AUTO] Запускаю автоматический DGIST monitor...")
-
-    asyncio.create_task(
-        dgist_bot_handlers._auto_monitor_loop(client)
-    )
-
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.disconnect()
