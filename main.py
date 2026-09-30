@@ -358,28 +358,17 @@ async def startup_event():
     except Exception as e:
         print(f"DB init error: {e}")
 
-    # Запускаем Telegram bot
     await client.start(bot_token=BOT_TOKEN)
 
-    # Регистрируем DGIST handlers
     register_dgist_handlers(client, user_states)
 
-    # Telegram client
-    asyncio.create_task(
-        client.run_until_disconnected()
-    )
-
-    # ==========================================
-    # AUTO DGIST MONITOR
-    # ==========================================
+    asyncio.create_task(client.run_until_disconnected())
 
     print("[AUTO] Запускаю автоматический DGIST monitor...")
 
     asyncio.create_task(
-        dgist_bot_handlers._auto_monitor_loop()
+        dgist_bot_handlers._auto_monitor_loop(client)
     )
-
-    print("[AUTO] DGIST monitor запущен.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
