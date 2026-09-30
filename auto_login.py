@@ -648,14 +648,29 @@ def login_and_get_cookie(
                     "[SSO] Жду завершения SSO..."
                 )
 
-                page.wait_for_selector(
-                    LOGGED_IN_MARKER_SELECTOR,
-                    timeout=30000
-                )
+                # Не полагаемся на DOM-селектор: на Render/headless
+                # он может не появиться, хотя SSO уже завершился.
+                try:
+                    page.wait_for_url(
+                        lambda url: "my.dgist.ac.kr" in url,
+                        timeout=60000
+                    )
+                except Exception:
+                    print(
+                        "[SSO] Не дождался URL my.dgist.ac.kr, "
+                        f"текущий URL: {page.url}"
+                    )
 
-                print(
-                    "[SSO] Логин подтверждён."
-                )
+                # Даём SSO закончить редиректы и выставить cookies.
+                page.wait_for_timeout(5000)
+
+                if "my.dgist.ac.kr" in page.url:
+                    print("[SSO] Логин подтверждён.")
+                else:
+                    raise RuntimeError(
+                        "SSO не подтвердился. "
+                        f"Текущий URL: {page.url}"
+                    )
 
             # ------------------------------------------------
             # 7. Открываем ECM
