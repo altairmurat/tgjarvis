@@ -243,12 +243,16 @@ def get_formatted_webapp_url(draft_id: str, message_id: int = 0) -> str:
 
 
 def make_draft_keyboard(draft_id: str, message_id: int):
-    """Создаёт инлайн-клавиатуру с Mini App кнопкой для редактирования."""
     webapp_url = get_formatted_webapp_url(draft_id, message_id)
+
     return [
-        [Button.inline("✅ Отправить", f"send:{draft_id}"),
-         Button.inline("❌ Отмена", f"cancel:{draft_id}")],
-        [types.KeyboardButtonWebView("✏️ Изменить текст", url=webapp_url)]
+        [
+            Button.inline("✅ Отправить", f"send:{draft_id}"),
+            Button.inline("❌ Отмена", f"cancel:{draft_id}")
+        ],
+        [
+            Button.url("✏️ Изменить текст", webapp_url)
+        ]
     ]
 
 
