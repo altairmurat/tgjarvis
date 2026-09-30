@@ -12,7 +12,6 @@ from email.utils import parsedate_to_datetime
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 
@@ -24,7 +23,6 @@ PORTAL_LOGIN_URL = (
     "https://my.dgist.ac.kr/com/portal/index.do?language=en"
 )
 
-# После обычного логина обязательно открываем ECM.
 ECM_URL = (
     "https://stuecm.dgist.ac.kr/site/ecmSiteList/index.do"
 )
@@ -39,7 +37,6 @@ CODE_FIELD_SELECTOR = "input#code"
 CODE_SUBMIT_SELECTOR = "button[onclick='ok();']"
 
 LOGGED_IN_MARKER_SELECTOR = "div.user-info span.name"
-
 
 IMAP_HOST = os.environ.get(
     "EMAIL_IMAP_HOST",
@@ -75,7 +72,8 @@ DGIST_USERNAME = os.environ.get(
 
 DGIST_PASSWORD = os.environ.get(
     "DGIST_PASSWORD",
-    "")
+    ""
+)
 
 PROFILE_DIR = os.path.join(
     os.path.dirname(__file__),
@@ -356,8 +354,6 @@ def fetch_verification_code(
 
                     if match:
 
-                        M.logout()
-
                         return match.group(1)
 
         finally:
@@ -382,22 +378,13 @@ def fetch_verification_code(
 
 def cookies_to_header_string(cookies):
 
-    """
-    Берём cookies ВСЕХ DGIST-доменов.
-
-    Это важно, потому что SSO использует:
-        auth.dgist.ac.kr
-        my.dgist.ac.kr
-        isign.dgist.ac.kr
-        www.dgist.ac.kr
-        stuecm.dgist.ac.kr
-    """
-
     allowed_domains = (
         "dgist.ac.kr",
     )
 
     parts = []
+
+    seen = set()
 
     for cookie in cookies:
 
@@ -421,6 +408,16 @@ def cookies_to_header_string(cookies):
         )
 
         if name and value:
+
+            key = (
+                domain,
+                name
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
 
             parts.append(
                 f"{name}={value}"
@@ -487,6 +484,173 @@ def save_cookies(
 
 
 # ============================================================
+# SSO HELPERS
+# ============================================================
+
+def wait_for_sso_to_finish(page, timeout_ms=90000):
+    """
+    Ждём, пока DGIST закончит SSO-цепочку.
+
+    Возможная цепочка:
+
+        isign/.../loginProcess
+              ↓
+        isign/.../saveToken.html
+              ↓
+        my.dgist.ac.kr/...
+
+    Поэтому не привязываемся к одному URL.
+    """
+
+    print(
+        "[SSO] Жду завершения SSO-цепочки..."
+    )
+
+    deadline = time.time() + (
+        timeout_ms / 1000
+    )
+
+    last_url = ""
+
+    while time.time() < deadline:
+
+        current_url = page.url
+
+        if current_url != last_url:
+            print(
+                f"[SSO] URL: {current_url}"
+            )
+            last_url = current_url
+
+        # Нормальный результат SSO
+        if (
+            "my.dgist.ac.kr" in current_url
+            and "login" not in current_url.lower()
+        ):
+            print(
+                "[SSO] Вернулись на my.dgist.ac.kr"
+            )
+            return True
+
+        # Промежуточный saveToken.html.
+        # Не трогаем страницу, просто даём JS
+        # выполнить редирект.
+        if "saveToken.html" in current_url:
+            print(
+                "[SSO] saveToken.html — "
+                "жду автоматический redirect..."
+            )
+
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            break
+
+    return (
+        "my.dgist.ac.kr" in page.url
+        and "login" not in page.url.lower()
+    )
+
+
+def open_ecm(page):
+    """
+    Открывает ECM и даёт DGIST несколько попыток
+    пройти SSO между isign -> stuecm.
+    """
+
+    for attempt in range(1, 4):
+
+        print(
+            f"[SSO] Открываю DGIST ECM "
+            f"(попытка {attempt}/3)..."
+        )
+
+        try:
+
+            page.goto(
+                ECM_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
+
+        except Exception as e:
+
+            print(
+                f"[SSO] ECM navigation warning: {e}"
+            )
+
+        # Даём JS / SSO цепочке завершиться.
+        try:
+            page.wait_for_timeout(5000)
+        except Exception:
+            pass
+
+        print(
+            "[SSO] ECM current URL: "
+            f"{page.url}"
+        )
+
+        # Уже в ECM
+        if (
+            "stuecm.dgist.ac.kr" in page.url
+            and "isign.dgist.ac.kr" not in page.url
+        ):
+
+            print(
+                "[SSO] ECM успешно открыт."
+            )
+
+            return True
+
+        # Если нас отправило в isign —
+        # ждём завершения SSO.
+        if "isign.dgist.ac.kr" in page.url:
+
+            print(
+                "[SSO] ECM отправил через isign. "
+                "Жду SSO redirect..."
+            )
+
+            wait_for_sso_to_finish(
+                page,
+                timeout_ms=90000
+            )
+
+            print(
+                "[SSO] После ожидания URL: "
+                f"{page.url}"
+            )
+
+            # Если вернулись на my — пробуем ECM ещё раз.
+            if "my.dgist.ac.kr" in page.url:
+
+                continue
+
+        # Иногда saveToken остаётся на несколько секунд.
+        if "saveToken.html" in page.url:
+
+            print(
+                "[SSO] Всё ещё saveToken.html. "
+                "Жду ещё 10 секунд..."
+            )
+
+            try:
+                page.wait_for_timeout(10000)
+            except Exception:
+                pass
+
+            if (
+                "stuecm.dgist.ac.kr" in page.url
+                and "isign.dgist.ac.kr" not in page.url
+            ):
+                return True
+
+            continue
+
+    return False
+
+
+# ============================================================
 # LOGIN
 # ============================================================
 
@@ -531,9 +695,9 @@ def login_and_get_cookie(
                 else context.new_page()
             )
 
-            # ------------------------------------------------
-            # 1. Открываем портал
-            # ------------------------------------------------
+            # ==================================================
+            # 1. PORTAL
+            # ==================================================
 
             print(
                 "[SSO] Открываю DGIST portal..."
@@ -545,16 +709,20 @@ def login_and_get_cookie(
                 timeout=60000
             )
 
-            # ------------------------------------------------
-            # 2. Проверяем существующую сессию
-            # ------------------------------------------------
+            # ==================================================
+            # 2. CHECK EXISTING SESSION
+            # ==================================================
+
+            session_alive = False
 
             try:
 
                 page.wait_for_selector(
                     LOGGED_IN_MARKER_SELECTOR,
-                    timeout=4000
+                    timeout=5000
                 )
+
+                session_alive = True
 
                 print(
                     "[SSO] Существующая сессия жива."
@@ -562,9 +730,16 @@ def login_and_get_cookie(
 
             except Exception:
 
-                # ------------------------------------------------
-                # 3. Новый логин
-                # ------------------------------------------------
+                print(
+                    "[SSO] Живой сессии нет. "
+                    "Начинаю новый логин."
+                )
+
+            # ==================================================
+            # 3. LOGIN
+            # ==================================================
+
+            if not session_alive:
 
                 print(
                     "[SSO] Ввожу логин и пароль..."
@@ -586,9 +761,9 @@ def login_and_get_cookie(
                     LOGIN_SUBMIT_SELECTOR
                 )
 
-                # ------------------------------------------------
-                # 4. Popup
-                # ------------------------------------------------
+                # ==================================================
+                # 4. POPUP
+                # ==================================================
 
                 print(
                     "[SSO] Жду popup..."
@@ -603,9 +778,9 @@ def login_and_get_cookie(
                     ALERT_CONFIRM_SELECTOR
                 )
 
-                # ------------------------------------------------
-                # 5. Код
-                # ------------------------------------------------
+                # ==================================================
+                # 5. CODE
+                # ==================================================
 
                 print(
                     "[SSO] Жду поле кода..."
@@ -640,87 +815,57 @@ def login_and_get_cookie(
                     CODE_SUBMIT_SELECTOR
                 )
 
-                # ------------------------------------------------
-                # 6. Ждём подтверждение логина
-                # ------------------------------------------------
+                # ==================================================
+                # 6. SSO
+                # ==================================================
+
+                if not wait_for_sso_to_finish(
+                    page,
+                    timeout_ms=120000
+                ):
+
+                    raise RuntimeError(
+                        "SSO не завершился. "
+                        f"Последний URL: {page.url}"
+                    )
 
                 print(
-                    "[SSO] Жду завершения SSO..."
+                    "[SSO] Логин подтверждён."
                 )
 
-                # Не полагаемся на DOM-селектор: на Render/headless
-                # он может не появиться, хотя SSO уже завершился.
-                try:
-                    page.wait_for_url(
-                        lambda url: "my.dgist.ac.kr" in url,
-                        timeout=60000
-                    )
-                except Exception:
-                    print(
-                        "[SSO] Не дождался URL my.dgist.ac.kr, "
-                        f"текущий URL: {page.url}"
-                    )
+            # ==================================================
+            # 7. ECM
+            # ==================================================
 
-                # Даём SSO закончить редиректы и выставить cookies.
-                page.wait_for_timeout(5000)
-
-                if "my.dgist.ac.kr" in page.url:
-                    print("[SSO] Логин подтверждён.")
-                else:
-                    raise RuntimeError(
-                        "SSO не подтвердился. "
-                        f"Текущий URL: {page.url}"
-                    )
-
-            # ------------------------------------------------
-            # 7. Открываем ECM
-            # ------------------------------------------------
-
-            print(
-                "[SSO] Открываю DGIST ECM..."
-            )
-
-            page.goto(
-                ECM_URL,
-                wait_until="networkidle",
-                timeout=60000
-            )
-
-            print(
-                "[SSO] Финальный URL: "
-                f"{page.url}"
-            )
-
-            print(
-                "[SSO] Title: "
-                f"{page.title()}"
-            )
-
-            # ------------------------------------------------
-            # 8. Проверяем, что ECM реально открылся
-            # ------------------------------------------------
-
-            if "isign.dgist.ac.kr/login" in page.url.lower():
-
-                raise RuntimeError(
-                    "ECM отправил обратно на isign login. "
-                    "SSO не завершился."
-                )
-
-            if "stuecm.dgist.ac.kr" not in page.url:
+            if not open_ecm(page):
 
                 raise RuntimeError(
                     "Не удалось открыть DGIST ECM. "
                     f"Текущий URL: {page.url}"
                 )
 
+            # ==================================================
+            # 8. INFO
+            # ==================================================
+
             print(
-                "[SSO] ECM успешно открыт."
+                "[SSO] Финальный URL: "
+                f"{page.url}"
             )
 
-            # ------------------------------------------------
-            # 9. Теперь сохраняем ВСЕ cookies
-            # ------------------------------------------------
+            try:
+
+                print(
+                    "[SSO] Title: "
+                    f"{page.title()}"
+                )
+
+            except Exception:
+                pass
+
+            # ==================================================
+            # 9. SAVE COOKIES
+            # ==================================================
 
             cookie_str = save_cookies(
                 context,
