@@ -25,6 +25,7 @@ from database import SessionLocal, engine
 import models
 import auto_login
 import dgist_monitor
+import dgist_bot_handlers
 from dgist_bot_handlers import register_dgist_handlers, handle_dgist_conversation_step
 
 app = FastAPI()
@@ -356,9 +357,29 @@ async def startup_event():
         print("Database tables created successfully")
     except Exception as e:
         print(f"DB init error: {e}")
+
+    # Запускаем Telegram bot
     await client.start(bot_token=BOT_TOKEN)
-    register_dgist_handlers(client, user_states)   # <-- ВСТАВИТЬ ЭТУ СТРОКУ
-    asyncio.create_task(client.run_until_disconnected())
+
+    # Регистрируем DGIST handlers
+    register_dgist_handlers(client, user_states)
+
+    # Telegram client
+    asyncio.create_task(
+        client.run_until_disconnected()
+    )
+
+    # ==========================================
+    # AUTO DGIST MONITOR
+    # ==========================================
+
+    print("[AUTO] Запускаю автоматический DGIST monitor...")
+
+    asyncio.create_task(
+        dgist_bot_handlers._auto_monitor_loop()
+    )
+
+    print("[AUTO] DGIST monitor запущен.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
