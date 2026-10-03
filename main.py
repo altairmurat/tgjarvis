@@ -107,6 +107,10 @@ def save_user_token(telegram_user_id: int, creds: Credentials):
             db.add(acc)
         acc.token_json = creds.to_json()
         db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error saving token for {telegram_user_id}: {e}")
+        raise
     finally:
         db.close()
 
@@ -198,16 +202,38 @@ EMAIL_TOOLS = [{
 
 
 def find_email_in_history(gmail, name: str) -> str | None:
-    res = gmail.users().messages().list(userId="me", q=f'"{name}"', maxResults=5).execute()
-    for m in res.get("messages", []):
-        msg = gmail.users().messages().get(
-            userId="me", id=m["id"], format="metadata", metadataHeaders=["From", "To"]
-        ).execute()
-        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-        for v in (headers.get("From", ""), headers.get("To", "")):
-            match = re.search(r"[\w.+-]+@[\w.-]+", v)
-            if match and name.split()[0].lower() in v.lower():
-                return match.group(0)
+    if not name or not name.strip():
+        return None
+    name_clean = name.strip()
+    first_name = name_clean.split()[0].lower()
+
+    my_email = ""
+    try:
+        profile = gmail.users().getProfile(userId="me").execute()
+        my_email = (profile.get("emailAddress") or "").lower()
+    except Exception:
+        pass
+
+    try:
+        res = gmail.users().messages().list(userId="me", q=f'"{name_clean}"', maxResults=5).execute()
+        for m in res.get("messages", []):
+            msg = gmail.users().messages().get(
+                userId="me", id=m["id"], format="metadata", metadataHeaders=["To", "From"]
+            ).execute()
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            
+            # Prioritize To header, then From
+            for header_val in (headers.get("To", ""), headers.get("From", "")):
+                if not header_val:
+                    continue
+                emails = re.findall(r"[\w.+-]+@[\w.-]+", header_val)
+                # Word boundary check for name
+                if re.search(rf"\b{re.escape(first_name)}\b", header_val, re.IGNORECASE):
+                    for email_addr in emails:
+                        if email_addr.lower() != my_email:
+                            return email_addr
+    except Exception as e:
+        print(f"Error finding email in history: {e}")
     return None
 
 
@@ -231,19 +257,22 @@ async def generate_email_text(topic: str, recipient: str, sendername: str) -> tu
         response_format={"type": "json_object"},
     )
     data = json.loads(r.choices[0].message.content)
-    return data["subject"], data["body"]
+    return data.get("subject", "Без темы"), data.get("body", "")
 
 
-def get_formatted_webapp_url(draft_id: str, message_id: int = 0) -> str:
-    """Формирует HTTPS URL для Telegram Mini App с ID сообщения."""
+def get_formatted_webapp_url(draft_id: str, message_id: int = 0, user_id: int = 0) -> str:
+    """Формирует HTTPS URL для Telegram Mini App с ID сообщения и пользователя."""
     base_url = WEBAPP_URL.strip().rstrip("/")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
-    return f"{base_url}/webapp?draft_id={draft_id}&message_id={message_id}"
+    query_parts = [f"draft_id={urllib.parse.quote(draft_id)}", f"message_id={message_id}"]
+    if user_id:
+        query_parts.append(f"user_id={user_id}")
+    return f"{base_url}/webapp?{'&'.join(query_parts)}"
 
 
-def make_draft_keyboard(draft_id: str, message_id: int):
-    webapp_url = get_formatted_webapp_url(draft_id, message_id)
+def make_draft_keyboard(draft_id: str, message_id: int, user_id: int = 0):
+    webapp_url = get_formatted_webapp_url(draft_id, message_id, user_id)
 
     return [
         [
@@ -251,14 +280,14 @@ def make_draft_keyboard(draft_id: str, message_id: int):
             Button.inline("❌ Отмена", f"cancel:{draft_id}")
         ],
         [
-            Button.url("✏️ Изменить текст", webapp_url)
+            types.KeyboardButtonWebView("✏️ Изменить текст", webapp_url)
         ]
     ]
 
 
 async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name, topic, sendername):
     subject, body = await generate_email_text(topic, name, sendername)
-    draft_id = create_gmail_draft(gmail, to_email, subject, body)
+    draft_id = await asyncio.to_thread(create_gmail_draft, gmail, to_email, subject, body)
     draft_cache[draft_id] = telegram_user_id  
     text_cache[draft_id] = body 
     
@@ -267,8 +296,8 @@ async def send_draft_to_telegram(event, gmail, telegram_user_id, to_email, name,
     # Сначала отправляем сообщение, чтобы зафиксировать message.id
     msg = await event.reply(display_text)
     
-    # Редактируем сообщение, навешивая клавиатуру с message.id
-    buttons = make_draft_keyboard(draft_id, msg.id)
+    # Редактируем сообщение, навешивая клавиатуру с message.id и user_id
+    buttons = make_draft_keyboard(draft_id, msg.id, telegram_user_id)
     await msg.edit(display_text, buttons=buttons)
 
 
@@ -282,19 +311,19 @@ async def try_handle_email_intent(event, user_id: int, user_message: str) -> boo
     if not msg.tool_calls:
         return False
 
-    gmail = get_gmail_client_for(user_id)
+    gmail = await asyncio.to_thread(get_gmail_client_for, user_id)
     if not gmail:
         auth_url = build_auth_url(user_id)
         await event.reply(f"Сначала подключи (или переподключи) Gmail: {auth_url}")
         return True
 
     args = json.loads(msg.tool_calls[0].function.arguments)
-    name = args["recipient_name"]
-    topic = args["topic"]
+    name = args.get("recipient_name") or ""
+    topic = args.get("topic") or ""
     sendername = args.get("sender_name") or "Имя отсутствует, просто отправь без учета имени"
 
     try:
-        email = args.get("recipient_email") or find_email_in_history(gmail, name)
+        email = args.get("recipient_email") or await asyncio.to_thread(find_email_in_history, gmail, name)
 
         if not email:
             user_states[user_id] = ("waiting_for_manual_email", name, topic, sendername)
@@ -319,8 +348,8 @@ async def on_callback(event):
         return
         
     action, draft_id = data.split(":")
-    telegram_user_id = draft_cache.get(draft_id)
-    gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
+    telegram_user_id = draft_cache.get(draft_id) or event.sender_id
+    gmail = await asyncio.to_thread(get_gmail_client_for, telegram_user_id) if telegram_user_id else None
 
     if not gmail:
         auth_url = build_auth_url(event.sender_id)
@@ -332,10 +361,14 @@ async def on_callback(event):
 
     try:
         if action == "send":
-            gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+            await asyncio.to_thread(
+                gmail.users().drafts().send(userId="me", body={"id": draft_id}).execute
+            )
             await event.edit("✅ Отправлено")
         else:
-            gmail.users().drafts().delete(userId="me", id=draft_id).execute()
+            await asyncio.to_thread(
+                gmail.users().drafts().delete(userId="me", id=draft_id).execute
+            )
             await event.edit("❌ Отменено")
     except RefreshError:
         delete_user_token(telegram_user_id)
@@ -345,9 +378,14 @@ async def on_callback(event):
             f"Пройди авторизацию заново по ссылке: {auth_url}"
         )
     except Exception as e:
-        await event.edit(f"Ошибка при выполнении действия: {e}")
+        err_msg = str(e)
+        if "404" in err_msg:
+            await event.edit("⚠️ Черновик уже отправлен или удалён.")
+        else:
+            await event.edit(f"Ошибка при выполнении действия: {e}")
     finally:
         draft_cache.pop(draft_id, None)
+        text_cache.pop(draft_id, None)
 
 
 # =====================================================================
@@ -415,7 +453,7 @@ async def get_text(draft_id: str):
 
 
 @app.get("/webapp", response_class=HTMLResponse)
-async def get_webapp(draft_id: str = "", message_id: int = 0):
+async def get_webapp(draft_id: str = "", message_id: int = 0, user_id: int = 0):
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -458,12 +496,13 @@ async def get_webapp(draft_id: str = "", message_id: int = 0):
             tg.expand();
 
             const urlParams = new URLSearchParams(window.location.search);
-            const draftId = urlParams.get('draft_id');
+            const draftId = urlParams.get('draft_id') || "";
             const messageId = parseInt(urlParams.get('message_id') || "0");
+            const paramUserId = parseInt(urlParams.get('user_id') || "0");
 
             async function loadText() {{
                 try {{
-                    const response = await fetch('/get-text?draft_id=' + draftId);
+                    const response = await fetch('/get-text?draft_id=' + encodeURIComponent(draftId));
                     const data = await response.json();
                     document.getElementById('email-text').value = data.text;
                 }} catch(e) {{
@@ -474,7 +513,7 @@ async def get_webapp(draft_id: str = "", message_id: int = 0):
 
             document.getElementById('save-btn').addEventListener('click', async () => {{
                 const updatedText = document.getElementById('email-text').value;
-                const user_id = tg.initDataUnsafe.user?.id || 0;
+                const user_id = tg.initDataUnsafe.user?.id || paramUserId || 0;
 
                 const response = await fetch('/update-draft', {{
                     method: 'POST',
@@ -504,8 +543,8 @@ async def get_webapp(draft_id: str = "", message_id: int = 0):
 async def update_draft(data: EditDraftModel):
     text_cache[data.draft_id] = data.new_text
     
-    telegram_user_id = draft_cache.get(data.draft_id) or data.chat_id
-    gmail = get_gmail_client_for(telegram_user_id) if telegram_user_id else None
+    telegram_user_id = draft_cache.get(data.draft_id) or (data.chat_id if data.chat_id != 0 else None)
+    gmail = await asyncio.to_thread(get_gmail_client_for, telegram_user_id) if telegram_user_id else None
     
     subject_val = "Без темы"
     to_val = ""
@@ -513,10 +552,12 @@ async def update_draft(data: EditDraftModel):
     if gmail:
         try:
             # Получаем тему и получателя из черновика
-            draft_info = gmail.users().drafts().get(userId="me", id=data.draft_id, format="full").execute()
-            headers = draft_info["message"]["payload"]["headers"]
-            to_val = next((h["value"] for h in headers if h["name"].lower() == "to"), "")
-            subject_val = next((h["value"] for h in headers if h["name"].lower() == "subject"), "Без темы")
+            draft_info = await asyncio.to_thread(
+                gmail.users().drafts().get(userId="me", id=data.draft_id, format="full").execute
+            )
+            headers = draft_info.get("message", {}).get("payload", {}).get("headers", [])
+            to_val = next((h["value"] for h in headers if h.get("name", "").lower() == "to"), "")
+            subject_val = next((h["value"] for h in headers if h.get("name", "").lower() == "subject"), "Без темы")
             
             # Собираем MIME-сообщение с гарантированным UTF-8
             msg = EmailMessage()
@@ -525,7 +566,9 @@ async def update_draft(data: EditDraftModel):
             msg.set_content(data.new_text, charset='utf-8')
             
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            gmail.users().drafts().update(userId="me", id=data.draft_id, body={"message": {"raw": raw}}).execute()
+            await asyncio.to_thread(
+                gmail.users().drafts().update(userId="me", id=data.draft_id, body={"message": {"raw": raw}}).execute
+            )
         except Exception as e:
             print(f"Error updating Gmail draft: {e}")
 
@@ -533,7 +576,7 @@ async def update_draft(data: EditDraftModel):
     if data.message_id != 0 and telegram_user_id:
         try:
             new_display_text = f"📧 Черновик для {to_val}\n\nТема: {subject_val}\n\n{data.new_text}"
-            buttons = make_draft_keyboard(data.draft_id, data.message_id)
+            buttons = make_draft_keyboard(data.draft_id, data.message_id, telegram_user_id)
             await client.edit_message(telegram_user_id, data.message_id, new_display_text, buttons=buttons)
         except Exception as e:
             print(f"Error editing Telegram message: {e}")
@@ -571,6 +614,9 @@ async def sendmessage(event):
 
 @client.on(events.NewMessage)
 async def necessary_task_handler(event):
+    if not event.is_private:
+        return
+
     user_id = event.sender_id
     sender = await event.get_sender()
 
@@ -580,14 +626,14 @@ async def necessary_task_handler(event):
     state = user_states.get(user_id)
     
     if await handle_dgist_conversation_step(event, user_id, state, user_states):
-        return                                             # <-- ВСТАВИТЬ
+        return
     
     if isinstance(state, tuple) and state[0] == "waiting_for_manual_email":
         _, name, topic, sendername = state
         email_match = re.search(r"[\w.+-]+@[\w.-]+", event.text or "")
         if email_match:
-            gmail = get_gmail_client_for(user_id)
-            del user_states[user_id]
+            gmail = await asyncio.to_thread(get_gmail_client_for, user_id)
+            user_states.pop(user_id, None)
             if gmail:
                 try:
                     await send_draft_to_telegram(event, gmail, user_id, email_match.group(0), name, topic, sendername)
@@ -599,43 +645,57 @@ async def necessary_task_handler(event):
                 auth_url = build_auth_url(user_id)
                 await event.reply(f"Сессия не найдена. Подключи Gmail заново: {auth_url}")
         else:
-            await event.reply("Это не похоже на email, попробуй ещё раз")
+            await event.reply("Это не похоже на email, попробуй ещё раз (или /cancel для отмены)")
         return
 
     elif event.text and event.text.startswith("!"):
-        if user_id in user_states:
-            if user_states[user_id] == "waiting_for_submitmessage":
-                message_tosend = event.text.split("/")
-                await client.send_message(message_tosend[0][1:], message_tosend[1])
+        if user_id in user_states and user_states[user_id] == "waiting_for_submitmessage":
+            parts = event.text[1:].split("/", 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                target_user, msg_body = parts[0].strip(), parts[1].strip()
+                try:
+                    await client.send_message(target_user, msg_body)
+                    await event.reply("✅ Сообщение успешно отправлено!")
+                except Exception as e:
+                    await event.reply(f"❌ Не удалось отправить сообщение: {e}")
+                finally:
+                    user_states.pop(user_id, None)
+            else:
+                await event.reply("Формат сообщения неверный. Используй: `!username/текст сообщения`")
+            return
 
     else:
         if event.message.voice:
-            user_states[user_id] = "waiting_for_voiceback"
-            audio_path = "voice.mp3"
             try:
                 voice_bytes = await event.message.download_media(file=bytes)
                 if not voice_bytes:
-                    await event.reply("Could not download voice message")
+                    await event.reply("Не удалось скачать голосовое сообщение.")
                     return
                 audio_file = io.BytesIO(voice_bytes)
                 audio_file.name = "voice.ogg"
                 response = await ai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe", file=audio_file
                 )
-                if response.text.strip():
-                    pending_textvoice[user_id] = response.text
+                transcribed_text = response.text.strip() if response.text else ""
+                if transcribed_text:
                     try:
-                        handled = await try_handle_email_intent(event, user_id, pending_textvoice[user_id])
+                        handled = await try_handle_email_intent(event, user_id, transcribed_text)
                         if not handled:
-                            response = ask_gpt(chat_text=pending_textvoice[user_id])
-                            await event.respond(response)
+                            gpt_response = await ask_gpt(chat_text=transcribed_text, user_id=user_id)
+                            await event.respond(gpt_response)
+                            await asyncio.to_thread(
+                                save_communication,
+                                sender.username if sender else None,
+                                transcribed_text
+                            )
                     except Exception as e:
-                        await event.respond(f"Sorry, I could not process your voice text: {e}")
+                        await event.respond(f"Не удалось обработать распознанный текст: {e}")
                 else:
-                    await event.reply("Я тебя не понял бро")
+                    await event.reply("Не удалось распознать речь в голосовом сообщении.")
+            except Exception as e:
+                await event.reply(f"Ошибка при обработке голосового сообщения: {e}")
             finally:
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
+                user_states.pop(user_id, None)
 
         elif event.photo:
             pending_photos[user_id] = event.message
@@ -654,8 +714,8 @@ async def necessary_task_handler(event):
                         await event.respond(response)
                     except Exception as e:
                         await event.respond(f"Ошибка: {e}")
-                    del user_states[user_id]
-                    del pending_photos[user_id]
+                    user_states.pop(user_id, None)
+                    pending_photos.pop(user_id, None)
                 return
         else:
             user_message = event.text
@@ -664,8 +724,12 @@ async def necessary_task_handler(event):
             try:
                 handled = await try_handle_email_intent(event, user_id, user_message)
                 if not handled:
-                    response = ask_gpt(chat_text=user_message)
+                    response = await ask_gpt(chat_text=user_message, user_id=user_id)
                     await event.respond(response)
-                    save_communication(sender.username if sender else None, user_message)
+                    await asyncio.to_thread(
+                        save_communication,
+                        sender.username if sender else None,
+                        user_message
+                    )
             except Exception as e:
                 await event.respond(f"Не получилось обработать сообщение. Ошибка: {e}")

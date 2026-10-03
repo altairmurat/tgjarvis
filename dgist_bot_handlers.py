@@ -115,8 +115,12 @@ def register_dgist_handlers(client, user_states: dict):
                     f"❌ Не удалось проверить портал:\n{result['error']}"
                 )
             else:
-                message = _format_new_posts_message(result)
-                await status_msg.edit(message)
+                messages = _format_new_posts_messages(result)
+                for idx, msg in enumerate(messages):
+                    if idx == 0:
+                        await status_msg.edit(msg)
+                    else:
+                        await event.respond(msg)
 
         except Exception as e:
             print(f"[/checkportal error] user_id={user_id}")
@@ -208,37 +212,43 @@ def _result_has_session_error(result: dict) -> bool:
     if not error:
         return False
 
+    # Игнорируем сетевые ошибки и таймауты (они не означают протухание сессии)
+    if any(marker in error for marker in ("timed out", "timeout", "connectionerror", "connection refused", "remotedisconnected")):
+        return False
+
     markers = (
+        "сессия истекла",
         "сессия",
+        "session expired",
         "session",
         "cookie",
-        "login",
-        "isign",
-        "stuecm",
+        "login.html",
+        "login.do",
+        "isign.dgist.ac.kr",
     )
     return any(marker in error for marker in markers)
 
 
-def _format_new_posts_message(result: dict) -> str:
+def _format_new_posts_messages(result: dict) -> list[str]:
     """
-    Сообщение БЕЗ Top-10.
-
-    Отправляем только реально новые посты.
-    И важные, и обычные — пользователь просил получать каждый новый пост.
+    Возвращает список сообщений (каждое <= 3800 символов),
+    чтобы длинные списки новых объявлений не обрезались и не терялись.
     """
     if not result:
-        return "❌ Монитор вернул пустой результат."
+        return ["❌ Монитор вернул пустой результат."]
 
     if result.get("error"):
-        return f"❌ {result['error']}"
+        return [f"❌ {result['error']}"]
 
     posts = list(result.get("new_important", []))
     posts += list(result.get("new_minor", []))
 
     if not posts:
-        return "✅ Проверка завершена. Новых объявлений нет."
+        return ["✅ Проверка завершена. Новых объявлений нет."]
 
-    lines = ["🔔 Новые объявления DGIST:\n"]
+    messages = []
+    current_lines = ["🔔 Новые объявления DGIST:\n"]
+    current_len = len(current_lines[0])
 
     for e in posts:
         emoji = "🔴" if e.get("important") else "📢"
@@ -247,17 +257,30 @@ def _format_new_posts_message(result: dict) -> str:
         date = e.get("date", "")
         summary = e.get("summary", "").strip()
 
-        lines.append(f"{emoji} [{category}]")
-        lines.append(f"{title}")
+        post_lines = [
+            f"{emoji} [{category}]",
+            f"{title}"
+        ]
         if date:
-            lines.append(f"📅 {date}")
+            post_lines.append(f"📅 {date}")
         if summary:
-            lines.append(summary)
-        lines.append("")
+            post_lines.append(summary)
+        post_lines.append("")
 
-    # Telegram ограничивает размер одного сообщения.
-    text = "\n".join(lines).strip()
-    return text[:3900]
+        post_text = "\n".join(post_lines)
+
+        if current_len + len(post_text) > 3800:
+            messages.append("\n".join(current_lines).strip())
+            current_lines = [post_text]
+            current_len = len(post_text)
+        else:
+            current_lines.append(post_text)
+            current_len += len(post_text)
+
+    if current_lines:
+        messages.append("\n".join(current_lines).strip())
+
+    return messages
 
 
 async def _auto_monitor_loop(client):
@@ -315,14 +338,15 @@ async def _auto_monitor_loop(client):
                         posts += list(result.get("new_minor", []))
 
                         if posts:
-                            message = _format_new_posts_message(result)
+                            messages = _format_new_posts_messages(result)
 
                             try:
-                                await client.send_message(
-                                    user_id,
-                                    message,
-                                    link_preview=False,
-                                )
+                                for msg in messages:
+                                    await client.send_message(
+                                        user_id,
+                                        msg,
+                                        link_preview=False,
+                                    )
                                 print(
                                     f"[AUTO] user={user_id}: "
                                     f"отправлено новых постов: {len(posts)}"
@@ -364,22 +388,19 @@ async def _auto_monitor_loop(client):
 def _run_login_subprocess(telegram_user_id: int, account: dict) -> None:
     """
     Запускает auto_login_cli.py как ОТДЕЛЬНЫЙ процесс через синхронный
-    subprocess.run (не asyncio-версию!) — именно синхронность тут и
-    решает конфликт event loop policy между Telethon и Playwright на
-    Windows. Эта функция сама по себе блокирующая, поэтому вызывающий
-    код всегда оборачивает её в asyncio.to_thread(...).
-
-    Креды передаются через env, а не argv — чтобы не светились в
-    списке процессов (Task Manager / ps).
+    subprocess.run (не asyncio-версию!).
     """
+    if not account or not account.get("dgist_password") or not account.get("email_app_password"):
+        raise RuntimeError("Учётные данные не удалось расшифровать или они отсутствуют. Пожалуйста, выполните /connectmyportal заново.")
+
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_login_cli.py")
 
     env = os.environ.copy()
-    env["CLI_DGIST_USERNAME"] = account["dgist_username"]
-    env["CLI_DGIST_PASSWORD"] = account["dgist_password"]
-    env["CLI_EMAIL_ADDRESS"] = account["email_address"]
-    env["CLI_EMAIL_APP_PASSWORD"] = account["email_app_password"]
-    env["CLI_EMAIL_IMAP_HOST"] = account["email_imap_host"]
+    env["CLI_DGIST_USERNAME"] = str(account.get("dgist_username") or "")
+    env["CLI_DGIST_PASSWORD"] = str(account.get("dgist_password") or "")
+    env["CLI_EMAIL_ADDRESS"] = str(account.get("email_address") or "")
+    env["CLI_EMAIL_APP_PASSWORD"] = str(account.get("email_app_password") or "")
+    env["CLI_EMAIL_IMAP_HOST"] = str(account.get("email_imap_host") or "imap.gmail.com")
 
     proc = subprocess.run(
         [sys.executable, script_path, str(telegram_user_id)],
@@ -489,15 +510,22 @@ async def handle_dgist_conversation_step(event, user_id: int, state, user_states
             await event.reply("App password не может быть пустым. Введи его ещё раз:")
             return True
 
-        await asyncio.to_thread(
-            save_dgist_account,
-            user_id, dgist_username, dgist_password, email_address, text,
-        )
-        del user_states[user_id]
-        await event.respond(
-            "✅ Готово! Данные сохранены (пароли зашифрованы в БД).\n\n"
-            "Команда /checkportal проверит объявления."
-        )
+        try:
+            await asyncio.to_thread(
+                save_dgist_account,
+                user_id, dgist_username, dgist_password, email_address, text,
+            )
+            user_states.pop(user_id, None)
+            await event.respond(
+                "✅ Готово! Данные сохранены (пароли зашифрованы в БД).\n\n"
+                "Команда /checkportal проверит объявления."
+            )
+        except Exception as e:
+            user_states.pop(user_id, None)
+            await event.respond(
+                f"❌ Ошибка сохранения данных: {e}\n"
+                "Попробуй запустить /connectmyportal снова."
+            )
         return True
 
     return False

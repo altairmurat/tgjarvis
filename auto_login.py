@@ -112,68 +112,44 @@ def _decode_maybe(value):
 
 
 def _get_email_body(msg) -> str:
-
     if msg.is_multipart():
-
-        chunks = []
+        plain_chunks = []
+        html_chunks = []
 
         for part in msg.walk():
-
             content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition", ""))
 
-            disposition = str(
-                part.get("Content-Disposition", "")
-            )
+            if "attachment" in disposition:
+                continue
 
-            if (
-                content_type in ("text/plain", "text/html")
-                and "attachment" not in disposition
-            ):
-
-                try:
-
-                    payload = part.get_payload(
-                        decode=True
-                    )
-
-                    charset = (
-                        part.get_content_charset()
-                        or "utf-8"
-                    )
-
-                    chunks.append(
-                        payload.decode(
-                            charset,
-                            errors="ignore"
-                        )
-                    )
-
-                except Exception:
+            try:
+                payload = part.get_payload(decode=True)
+                if not payload:
                     continue
+                charset = part.get_content_charset() or "utf-8"
+                decoded = payload.decode(charset, errors="ignore")
+                if content_type == "text/plain":
+                    plain_chunks.append(decoded)
+                elif content_type == "text/html":
+                    html_chunks.append(decoded)
+            except Exception:
+                continue
 
-        return "\n".join(chunks)
+        if plain_chunks:
+            return "\n".join(plain_chunks)
+        if html_chunks:
+            return "\n".join(html_chunks)
 
     try:
-
-        payload = msg.get_payload(
-            decode=True
-        )
-
-        charset = (
-            msg.get_content_charset()
-            or "utf-8"
-        )
-
-        return payload.decode(
-            charset,
-            errors="ignore"
-        )
-
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="ignore")
     except Exception:
+        pass
 
-        return str(
-            msg.get_payload()
-        )
+    return str(msg.get_payload() or "")
 
 
 def fetch_verification_code(
@@ -306,7 +282,7 @@ def fetch_verification_code(
 
                     if (
                         msg_ts
-                        < min_timestamp - 15
+                        < min_timestamp - 120
                     ):
                         continue
 
@@ -347,13 +323,25 @@ def fetch_verification_code(
                         msg
                     )
 
+                    clean_text = re.sub(r"<[^>]+>", " ", body)
+
+                    # Сначала ищем код рядом с ключевыми словами на корейском/английском
+                    context_match = re.search(
+                        r"(?:인증번호|인증\s*코드|verification\s*code|code)[\s:=*#\[\]]*([0-9]{6})",
+                        clean_text,
+                        re.IGNORECASE
+                    )
+
+                    if context_match:
+                        return context_match.group(1)
+
+                    # Fallback на любой 6-значный код в очищенном тексте
                     match = re.search(
                         CODE_REGEX,
-                        body
+                        clean_text
                     )
 
                     if match:
-
                         return match.group(1)
 
         finally:
@@ -683,7 +671,13 @@ def login_and_get_cookie(
         context = (
             p.chromium.launch_persistent_context(
                 profile_dir,
-                headless=True
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
         )
 

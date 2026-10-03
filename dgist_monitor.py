@@ -1300,6 +1300,14 @@ def run_once(
                     f"[СЕССИЯ ИСТЕКЛА] {e}"
                 )
 
+                seen[menu_key] = list(
+                    existing_ids
+                )
+                save_seen(
+                    seen,
+                    state_file,
+                )
+
                 return {
                     "new_important":
                         new_important,

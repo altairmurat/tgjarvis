@@ -1,6 +1,11 @@
-# Secrets
+# Secrets & Env
 .env
 *.env
+credentials.json
+
+# Telegram session files
+*.session
+*.session-journal
 
 # Python
 __pycache__/
@@ -12,11 +17,13 @@ venv/
 .venv/
 env/
 
-# DGIST sessions / cookies / browser
+# DGIST user data / sessions / cookies / browser profiles
 user_data/
 browser_profile/
 session_cookie.txt
 debug_listbbs.html
+seen_ids.json
+summaries_log.jsonl
 
 # Playwright
 playwright-report/
@@ -27,30 +34,11 @@ test-results/
 *.sqlite
 *.sqlite3
 
-# IDE
+# IDE & OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
-
-credentials.json
-.env
-*.env
-
-user_data/
-browser_profile/
-
-__pycache__/
-*.pyc
-
-*.db
-*.sqlite
-*.sqlite3
-
-debug_listbbs.html
-session_cookie.txt
